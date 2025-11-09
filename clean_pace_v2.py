@@ -274,26 +274,108 @@ def parse_official_ratings(or_text: str) -> pd.DataFrame:
 
 # 3) Race Class / Prize
 def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
+    """
+    Parse 'Race Class - Today: Class X £Y' section.
+    Supports two formats:
+      A) Tabular: columns include 'Horse', 'Avg 3', 'Avg 5'
+      B) Block:  Horse on its own line, followed by several 'Cl.. £..' lines,
+                 then two lines with money only (Avg 3 then Avg 5).
+    Returns (df, today_class_value)
+    """
     lines = rc_text.splitlines()
+
+    # --- extract today's class value from header line
     today_class_value = None
     if lines and lines[0].strip().lower().startswith("race class - today"):
-        # Extract first '£...' occurrence
         m = re.search(r"£\s*[0-9]*\.?[0-9]+\s*[KkMm]?", lines[0])
         if m:
             today_class_value = _to_float_money(m.group(0))
         # drop header
-        rc_text = "\n".join(lines[1:])
+        rc_text_body = "\n".join(lines[1:])
+    else:
+        rc_text_body = rc_text
 
-    df = _read_table_guess(rc_text)
-    if "Horse" not in df.columns:
-        raise ValueError("Race Class: missing 'Horse' column.")
-    df["Horse"] = df["Horse"].astype(str).str.strip()
+    # -------- Attempt A: tabular parse
+    def _try_tabular(text: str) -> Optional[pd.DataFrame]:
+        try:
+            df = _read_table_guess(text)
+        except Exception:
+            return None
+        if "Horse" not in df.columns:
+            return None
+        df["Horse"] = df["Horse"].astype(str).str.strip()
+        # parse money if present
+        if "Avg 3" in df.columns:
+            df["avg3_prize"] = df["Avg 3"].apply(_to_float_money)
+        else:
+            df["avg3_prize"] = np.nan
+        if "Avg 5" in df.columns:
+            df["avg5_prize"] = df["Avg 5"].apply(_to_float_money)
+        else:
+            df["avg5_prize"] = np.nan
+        keep = ["Horse", "avg3_prize", "avg5_prize"]
+        return df[keep]
 
-    # Parse Avg 3 / Avg 5 to money
-    df["avg3_prize"] = df.get("Avg 3", np.nan).apply(_to_float_money)
-    df["avg5_prize"] = df.get("Avg 5", np.nan).apply(_to_float_money)
+    df_tab = _try_tabular(rc_text_body)
 
-    df["today_class_value"] = today_class_value
+    # If tabular worked AND at least some avg values parsed, use it
+    if df_tab is not None and (
+        df_tab["avg3_prize"].notna().any() or df_tab["avg5_prize"].notna().any()
+    ):
+        df_out = df_tab.copy()
+        df_out["today_class_value"] = today_class_value
+        def ccs_from_cd(cd: Optional[float]) -> Optional[int]:
+            if cd is None or (isinstance(cd, float) and np.isnan(cd)): return None
+            if cd >= 0.40: return 5
+            if cd >= 0.15: return 4
+            if cd >= -0.15: return 3
+            if cd >= -0.40: return 2
+            return 1
+        df_out["cd"] = (df_out["avg3_prize"] / df_out["today_class_value"]) - 1 if today_class_value else np.nan
+        df_out["ccs_5"] = df_out["cd"].apply(ccs_from_cd)
+        return df_out[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_class_value
+
+    # -------- Attempt B: block parser
+    # Clean out the table header line if present (Horse Lto1 Lto2 ...)
+    body_lines = [ln for ln in rc_text_body.splitlines() if ln.strip()]
+    if body_lines and body_lines[0].strip().lower().startswith("horse"):
+        body_lines = body_lines[1:]
+
+    # A horse line is a non-empty line that does NOT start with 'Cl' and does NOT start with '£'
+    def is_horse_line(s: str) -> bool:
+        t = s.strip()
+        if not t: return False
+        if t.lower().startswith("cl"): return False
+        if t.startswith("£"): return False
+        # avoid stray 'Avg' labels if ever present
+        if "avg" in t.lower(): return False
+        return True
+
+    horses = []
+    i = 0
+    n = len(body_lines)
+    while i < n:
+        line = body_lines[i].strip()
+        if is_horse_line(line):
+            horse = line
+            i += 1
+            block = []
+            while i < n and not is_horse_line(body_lines[i]):
+                block.append(body_lines[i].strip())
+                i += 1
+            # from the block, take the last two money lines as Avg3, Avg5 (order in your sample)
+            money_vals = [ _to_float_money(x) for x in block if "£" in x ]
+            avg3, avg5 = (money_vals[-2], money_vals[-1]) if len(money_vals) >= 2 else (None, None)
+            horses.append({"Horse": horse, "avg3_prize": avg3, "avg5_prize": avg5})
+        else:
+            i += 1
+
+    df_blk = pd.DataFrame(horses)
+    if df_blk.empty:
+        # fallback: at least return an empty shell with today_class_value
+        return pd.DataFrame(columns=["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]), today_class_value
+
+    df_blk["today_class_value"] = today_class_value
 
     def ccs_from_cd(cd: Optional[float]) -> Optional[int]:
         if cd is None or (isinstance(cd, float) and np.isnan(cd)): return None
@@ -303,10 +385,11 @@ def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
         if cd >= -0.40: return 2
         return 1
 
-    df["cd"] = (df["avg3_prize"] / df["today_class_value"]) - 1 if today_class_value else np.nan
-    df["ccs_5"] = df["cd"].apply(ccs_from_cd)
-    keep = ["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]
-    return df[keep], today_class_value
+    df_blk["cd"] = (df_blk["avg3_prize"] / df_blk["today_class_value"]) - 1 if today_class_value else np.nan
+    df_blk["ccs_5"] = df_blk["cd"].apply(ccs_from_cd)
+
+    return df_blk[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_class_value
+
 
 # -------------------------------------------------
 # UI — Two tabs: (1) Single-Paste + Process, (2) Manual 3-box (debug)
@@ -391,3 +474,4 @@ st.caption(
     "Official Ratings adds unexposed handling and a highest-winning OR by code (if supplied via 'Highest'). "
     "Race Class extracts Today Class £ from the header and computes cd & ccs_5."
 )
+
