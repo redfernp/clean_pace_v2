@@ -1,12 +1,7 @@
 # clean_pace_v2_allinone.py
-# One main tab with TWO paste boxes:
-#  Box A: Run Style + Official Ratings + Race Class (single paste; auto-split)
-#  Box B: Boxes 4 & 5 combined (speed + conditions in one paste)
-# Adds a minimal Suitability Score preview (pace scenario + weights + class par).
-
 from __future__ import annotations
-
 import re
+from dataclasses import dataclass
 from io import StringIO
 from typing import Dict, List, Optional, Tuple
 
@@ -14,16 +9,15 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# -------------------------------------------------
-# App Meta
-# -------------------------------------------------
+# =========================
+# App Setup
+# =========================
 st.set_page_config(page_title="CleanPace v2 — All-in-One", page_icon="🏇", layout="wide")
-st.title("🏇 CleanPace v2 — All-in-One Normaliser")
-st.caption("Box A: RS/OR/Class (single paste). Box B: Boxes 4&5 (Speed + Conditions). One click → combined CSV + Suitability preview.")
+st.title("🏇 CleanPace v2 — All-in-One Normaliser + Suitability")
 
-# -------------------------------------------------
-# Generic helpers
-# -------------------------------------------------
+# =========================
+# Small helpers
+# =========================
 def _read_table_guess(text: str) -> pd.DataFrame:
     text = text.strip()
     try:
@@ -35,65 +29,50 @@ def _mean_ignore_zero(values: List[float]) -> Optional[float]:
     vals = [float(v) for v in values if pd.notna(v) and float(v) > 0]
     return round(sum(vals) / len(vals), 2) if vals else None
 
-def _rs_category(avg: Optional[float], f=1.6, p=2.4, m=3.0) -> Optional[str]:
+def _rs_category_from_value(avg: Optional[float], front_thr=1.6, prom_thr=2.4, mid_thr=3.0) -> Optional[str]:
     if avg is None or (isinstance(avg, float) and np.isnan(avg)):
         return None
-    if avg < f: return "Front"
-    if avg < p: return "Prominent"
-    if avg < m: return "Mid"
+    if avg < front_thr: return "Front"
+    if avg < prom_thr:  return "Prominent"
+    if avg < mid_thr:   return "Mid"
     return "Hold-up"
 
-def _to_float_money(val: str) -> Optional[float]:
-    if val is None:
-        return None
-    s = str(val).strip().replace(",", "").replace(" ", "")
-    if not s:
-        return None
+def _numbers(s: str) -> List[float]:
+    return [float(x) for x in re.findall(r"-?\d+\.?\d*", str(s))]
+
+def _to_money(val: str) -> Optional[float]:
+    if val is None: return None
+    s = str(val).strip().replace(",", "")
     m = re.search(r"£\s*([0-9]*\.?[0-9]+)\s*([KkMm])?", s)
-    if not m:
-        return None
-    num = float(m.group(1))
-    suf = (m.group(2) or "").upper()
+    if not m: return None
+    num = float(m.group(1)); suf = (m.group(2) or "").upper()
     if suf == "K": num *= 1000
     if suf == "M": num *= 1_000_000
-    return float(num)
+    return num
 
-def _numbers(s: str) -> List[float]:
-    return [float(x) for x in re.findall(r"-?\d+\.?\d*", s)]
-
-# -------------------------------------------------
-# Splitter for the 3-in-1 paste (Box A)
-# -------------------------------------------------
+# =========================
+# Split Box A paste into 3 sections
+# =========================
 def split_three_sections(raw: str) -> Tuple[str, str, str]:
-    """
-    Expect headings (case-insensitive) in this order:
-      Run Style Figure
-      Official Ratings
-      Race Class - Today
-    """
     text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
 
-    def find_idx(pattern: str) -> int:
-        m = re.search(pattern, text, flags=re.I)
+    def find_idx(pat: str) -> int:
+        m = re.search(pat, text, flags=re.I)
         return m.start() if m else -1
 
     i_rs = find_idx(r"\bRun\s*Style\s*Figure\b")
     i_or = find_idx(r"\bOfficial\s*Ratings\b")
     i_rc = find_idx(r"\bRace\s*Class\s*-\s*Today\b")
-
     if min(i_rs, i_or, i_rc) == -1:
         raise ValueError("Anchors not found. Need 'Run Style Figure', 'Official Ratings', 'Race Class - Today: ...'.")
     if not (i_rs < i_or < i_rc):
         raise ValueError("Anchors out of order. Expected: Run Style → Official Ratings → Race Class.")
 
-    rs_text = text[i_rs:i_or].strip()
-    or_text = text[i_or:i_rc].strip()
-    rc_text = text[i_rc:].strip()
-    return rs_text, or_text, rc_text
+    return text[i_rs:i_or].strip(), text[i_or:i_rc].strip(), text[i_rc:].strip()
 
-# -------------------------------------------------
-# Section parsers for Box A
-# -------------------------------------------------
+# =========================
+# Parse Run Style section
+# =========================
 def parse_run_style(rs_text: str, front_thr=1.6, prom_thr=2.4, mid_thr=3.0) -> pd.DataFrame:
     lines = rs_text.splitlines()
     if lines and lines[0].strip().lower().startswith("run style figure"):
@@ -105,12 +84,16 @@ def parse_run_style(rs_text: str, front_thr=1.6, prom_thr=2.4, mid_thr=3.0) -> p
 
     lto5 = [c for c in [f"Lto{i}" for i in range(1,6)] if c in df.columns]
     lto10 = [c for c in [f"Lto{i}" for i in range(1,11)] if c in df.columns]
-    for c in lto10:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in lto10: df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    df["RS_Avg"]   = df.apply(lambda r: _mean_ignore_zero([r[c] for c in lto5]), axis=1)
-    df["RS_Avg10"] = df.apply(lambda r: _mean_ignore_zero([r[c] for c in lto10]), axis=1)
-    df["RS_Cat"]   = df["RS_Avg"].apply(lambda x: _rs_category(x, front_thr, prom_thr, mid_thr))
+    # compute RS_Avg(5) + RS_Avg10 if not provided
+    if "RS_Avg" not in df.columns:
+        df["RS_Avg"]   = df.apply(lambda r: _mean_ignore_zero([r[c] for c in lto5]), axis=1)
+    if "RS_Avg10" not in df.columns:
+        df["RS_Avg10"] = df.apply(lambda r: _mean_ignore_zero([r[c] for c in lto10]), axis=1)
+
+    # RS_Cat from RS_Avg (explicitly per spec)
+    df["RS_Cat"] = df["RS_Avg"].apply(lambda x: _rs_category_from_value(x, front_thr, prom_thr, mid_thr))
 
     if "Dr.%" in df.columns:
         df["Dr.%"] = df["Dr.%"].astype(str).str.replace("%", "", regex=False)
@@ -120,54 +103,43 @@ def parse_run_style(rs_text: str, front_thr=1.6, prom_thr=2.4, mid_thr=3.0) -> p
            [c for c in ["Mode 5","Mode 10","Total","Mode All","Draw","Dr.%"] if c in df.columns]
     return df[keep]
 
-def _parse_or_rating_line(s: str) -> Optional[int]:
+# =========================
+# Parse Official Ratings section
+# =========================
+def _parse_or_line(s: str) -> Optional[int]:
     s = str(s).strip()
-    if not s:
-        return None
+    if not s: return None
     left = s.split("/")[0].strip()
     m = re.search(r"-?\d+", left)
     return int(m.group(0)) if m else None
 
 def parse_official_ratings(or_text: str) -> pd.DataFrame:
-    """
-    Produces:
-      today_or, or_3back, max_or_10, re_lb, d_or_trend, ts_5,
-      handicap_runs, hwin_or, delta_hwin_code, delta_hwin_adj,
-      rating_fit_code_5, rating_fit_code_adj_5, ts_5_adj,
-      rating_context_index
-    """
     lines = [l for l in or_text.splitlines() if l.strip()]
     if lines and lines[0].strip().lower().startswith("official ratings"):
         lines = lines[1:]
 
-    rows = []
-    i = 0
+    rows = []; i = 0
     while i < len(lines):
         parts = lines[i].split("\t")
         if i == 0 and parts and parts[0].strip().lower().startswith("horse"):
-            i += 1
-            continue
-
+            i += 1; continue
         if len(parts) >= 5:
             horse = parts[0].strip()
             today_str = parts[2].strip()
             highest_header_str = parts[4].strip()
-
             i += 1
             ratings: List[Optional[int]] = []
             j = i
             while j < len(lines):
                 nxt = lines[j].split("\t")
-                if len(nxt) >= 5:
-                    break
-                ratings.append(_parse_or_rating_line(lines[j]))
-                j += 1
+                if len(nxt) >= 5: break
+                ratings.append(_parse_or_line(lines[j])); j += 1
             i = j
 
             today_or = int(re.search(r"-?\d+", today_str).group(0)) if re.search(r"-?\d+", today_str) else None
-            valid_ratings = [x for x in ratings if x is not None]
-            max_or_10 = max(valid_ratings) if valid_ratings else None
-            or_3back  = valid_ratings[2] if len(valid_ratings) >= 3 else None
+            valid = [x for x in ratings if x is not None]
+            max_or_10 = max(valid) if valid else None
+            or_3back  = valid[2] if len(valid) >= 3 else None
 
             re_lb = (max_or_10 - today_or) if (max_or_10 is not None and today_or is not None) else None
             d_or_trend = (today_or - or_3back) if (today_or is not None and or_3back is not None) else None
@@ -179,14 +151,13 @@ def parse_official_ratings(or_text: str) -> pd.DataFrame:
                     if d_or_trend >= 2:   ts_5 = min(5, ts_5 + 0.5)
                     elif d_or_trend <= -2: ts_5 = max(1, ts_5 - 0.5)
 
-            handicap_runs = sum(1 for r in valid_ratings if (r is not None and r > 0))
-
             hwin_or = None
             mH = re.search(r"-?\d+", highest_header_str)
             if mH: hwin_or = int(mH.group(0))
 
-            delta_hwin_code = (hwin_or - today_or) if (hwin_or is not None and today_or is not None) else None
+            handicap_runs = sum(1 for r in valid if (r is not None and r > 0))
 
+            delta_hwin_code = (hwin_or - today_or) if (hwin_or is not None and today_or is not None) else None
             tau = 6 if handicap_runs < 3 else 4 if handicap_runs <= 5 else 2 if handicap_runs <= 9 else 0
             if (hwin_or is not None) and (today_or is not None) and (today_or > hwin_or):
                 delta_hwin_adj = (hwin_or + tau) - today_or
@@ -234,21 +205,19 @@ def parse_official_ratings(or_text: str) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
+# =========================
+# Parse Race Class section
+# =========================
 def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
-    """
-    Supports table or block. Returns Horse + (avg3_prize, avg5_prize, today_class_value, cd, ccs_5)
-    """
     lines = rc_text.splitlines()
-    today_class_value = None
+    today_val = None
     if lines and lines[0].strip().lower().startswith("race class - today"):
         m = re.search(r"£\s*[0-9]*\.?[0-9]+\s*[KkMm]?", lines[0])
-        if m:
-            today_class_value = _to_float_money(m.group(0))
+        if m: today_val = _to_money(m.group(0))
         rc_text_body = "\n".join(lines[1:])
     else:
         rc_text_body = rc_text
 
-    # try tabular
     def _try_tabular(text: str) -> Optional[pd.DataFrame]:
         try:
             df = _read_table_guess(text)
@@ -257,26 +226,26 @@ def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
         if "Horse" not in df.columns:
             return None
         df["Horse"] = df["Horse"].astype(str).str.strip()
-        df["avg3_prize"] = df.get("Avg 3", np.nan).apply(_to_float_money) if "Avg 3" in df.columns else np.nan
-        df["avg5_prize"] = df.get("Avg 5", np.nan).apply(_to_float_money) if "Avg 5" in df.columns else np.nan
+        df["avg3_prize"] = df.get("Avg 3", np.nan).apply(_to_money) if "Avg 3" in df.columns else np.nan
+        df["avg5_prize"] = df.get("Avg 5", np.nan).apply(_to_money) if "Avg 5" in df.columns else np.nan
         return df[["Horse","avg3_prize","avg5_prize"]]
 
     df_tab = _try_tabular(rc_text_body)
     if df_tab is not None and (df_tab["avg3_prize"].notna().any() or df_tab["avg5_prize"].notna().any()):
         df_out = df_tab.copy()
-        df_out["today_class_value"] = today_class_value
-        def ccs_from_cd(cd: Optional[float]) -> Optional[int]:
-            if cd is None or (isinstance(cd, float) and np.isnan(cd)): return None
+        df_out["today_class_value"] = today_val
+        def ccs(cd):
+            if pd.isna(cd): return None
             if cd >= 0.40: return 5
             if cd >= 0.15: return 4
             if cd >= -0.15: return 3
             if cd >= -0.40: return 2
             return 1
-        df_out["cd"]    = (df_out["avg3_prize"] / df_out["today_class_value"]) - 1 if today_class_value else np.nan
-        df_out["ccs_5"] = df_out["cd"].apply(ccs_from_cd)
-        return df_out[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_class_value
+        df_out["cd"] = (df_out["avg3_prize"] / df_out["today_class_value"]) - 1 if today_val else np.nan
+        df_out["ccs_5"] = df_out["cd"].apply(ccs)
+        return df_out[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_val
 
-    # fallback block
+    # Fallback (blocky)
     body_lines = [ln for ln in rc_text_body.splitlines() if ln.strip()]
     if body_lines and body_lines[0].strip().lower().startswith("horse"):
         body_lines = body_lines[1:]
@@ -289,19 +258,15 @@ def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
         if "avg" in t.lower(): return False
         return True
 
-    horses = []
-    i = 0
-    n = len(body_lines)
+    horses = []; i = 0; n = len(body_lines)
     while i < n:
         line = body_lines[i].strip()
         if is_horse_line(line):
-            horse = line
-            i += 1
+            horse = line; i += 1
             block = []
             while i < n and not is_horse_line(body_lines[i]):
-                block.append(body_lines[i].strip())
-                i += 1
-            money_vals = [_to_float_money(x) for x in block if "£" in x]
+                block.append(body_lines[i].strip()); i += 1
+            money_vals = [_to_money(x) for x in block if "£" in x]
             avg3, avg5 = (money_vals[-2], money_vals[-1]) if len(money_vals) >= 2 else (None, None)
             horses.append({"Horse": horse, "avg3_prize": avg3, "avg5_prize": avg5})
         else:
@@ -309,27 +274,24 @@ def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
 
     df_blk = pd.DataFrame(horses)
     if df_blk.empty:
-        return pd.DataFrame(columns=["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]), today_class_value
+        return pd.DataFrame(columns=["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]), today_val
 
-    df_blk["today_class_value"] = today_class_value
-    def ccs_from_cd(cd: Optional[float]) -> Optional[int]:
-        if cd is None or (isinstance(cd, float) and np.isnan(cd)): return None
+    df_blk["today_class_value"] = today_val
+    def ccs(cd):
+        if pd.isna(cd): return None
         if cd >= 0.40: return 5
         if cd >= 0.15: return 4
         if cd >= -0.15: return 3
         if cd >= -0.40: return 2
         return 1
-    df_blk["cd"]    = (df_blk["avg3_prize"] / df_blk["today_class_value"]) - 1 if today_class_value else np.nan
-    df_blk["ccs_5"] = df_blk["cd"].apply(ccs_from_cd)
-    return df_blk[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_class_value
+    df_blk["cd"] = (df_blk["avg3_prize"] / df_blk["today_class_value"]) - 1 if today_val else np.nan
+    df_blk["ccs_5"] = df_blk["cd"].apply(ccs)
+    return df_blk[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_val
 
-# -------------------------------------------------
-# Box B — Boxes 4 & 5 (single paste) parsing
-# -------------------------------------------------
-BOX_ORDER = [
-    "win_pct", "form_avg", "speed_series",
-    "crs", "dist", "lhrh", "going", "cls", "runpm1", "trackstyle"
-]
+# =========================
+# Boxes 4 & 5 (single paste)
+# =========================
+BOX_ORDER = ["win_pct", "form_avg", "speed_series", "crs", "dist", "lhrh", "going", "cls", "runpm1", "trackstyle"]
 
 def _looks_like_name(line: str) -> bool:
     t = line.strip()
@@ -342,46 +304,38 @@ def _looks_like_name(line: str) -> bool:
 def _parse_wpt_value(val: str) -> Tuple[Optional[float], Optional[int], Optional[int], Optional[int]]:
     val = str(val).strip()
     m = re.search(r"\((\d+)\s*/\s*(\d+)\s*/\s*(\d+)\)", val)
-    if not m:
-        return None, None, None, None
+    if not m: return None, None, None, None
     w = int(m.group(1)); p = int(m.group(2)); t = int(m.group(3))
-    place = None if t == 0 else round((w + p) / t, 3)
+    place = None if t == 0 else round((w+p)/t, 3)
     return place, w, p, t
 
 def _parse_speed_series(s: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     nums = _numbers(s)
-    if not nums:
-        return None, None, None, None
+    if not nums: return None, None, None, None
     last = nums[-1]; highest = max(nums)
-    avg_last_3 = round(sum(nums[-3:])/min(3, len(nums)), 1)
-    avg_all    = round(sum(nums)/len(nums), 1)
-    return last, highest, avg_last_3, avg_all
+    avg3 = round(sum(nums[-3:])/min(3, len(nums)), 1)
+    avgall = round(sum(nums)/len(nums), 1)
+    return last, highest, avg3, avgall
 
 def parse_box45_single(raw: str) -> pd.DataFrame:
     lines = [ln for ln in raw.replace("\r\n","\n").replace("\r","\n").split("\n") if ln.strip()]
-    if not lines:
-        return pd.DataFrame(columns=["Horse"])
+    if not lines: return pd.DataFrame(columns=["Horse"])
     if lines[0].strip().lower().startswith("horse"):
         lines = lines[1:]
 
     i, n = 0, len(lines)
     recs: List[Dict[str, object]] = []
     while i < n:
-        while i < n and not _looks_like_name(lines[i]):
-            i += 1
+        while i < n and not _looks_like_name(lines[i]): i += 1
         if i >= n: break
         name = lines[i].strip(); i += 1
-
         values: List[str] = []
         while i < n and len(values) < 10:
             if _looks_like_name(lines[i]): break
             values.append(lines[i].strip()); i += 1
-        if len(values) < 10: values += [None] * (10 - len(values))
-        else: values = values[:10]
-
+        values += [None] * (10 - len(values)) if len(values) < 10 else []
         data = {"Horse": name}
-        for key, val in zip(BOX_ORDER, values):
-            data[key] = val
+        for key, val in zip(BOX_ORDER, values): data[key] = val
         recs.append(data)
 
     df = pd.DataFrame(recs)
@@ -390,17 +344,16 @@ def parse_box45_single(raw: str) -> pd.DataFrame:
     return df
 
 def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
-    if df_raw.empty:
-        return df_raw
+    if df_raw.empty: return df_raw.copy()
+    out = df_raw.copy()
 
     last_list, high_list, avg3_list, all_list, keyavg_list = [], [], [], [], []
-    for s in df_raw["speed_series"].fillna(""):
+    for s in out["speed_series"].fillna(""):
         last, high, avg3, avgall = _parse_speed_series(s)
         last_list.append(last); high_list.append(high)
         avg3_list.append(avg3);  all_list.append(avgall)
         keyavg_list.append(None if (last is None or high is None or avg3 is None) else round((last+high+avg3)/3, 1))
 
-    out = df_raw.copy()
     out["LastRace"] = last_list
     out["Highest"]  = high_list
     out["Avg3"]     = avg3_list
@@ -416,72 +369,162 @@ def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
     keep = [c for c in keep if c in out.columns]
     return out[keep]
 
-# -------------------------------------------------
-# Suitability Preview Helpers
-# -------------------------------------------------
+# =========================
+# Pace engine + Suitability (from RS_Avg classification)
+# =========================
+@dataclass
+class HorseRow:
+    horse: str
+    style_cat: Optional[str]          # Front/Prominent/Mid/Hold-up (from RS_Avg)
+    adj_speed: Optional[float]        # AdjSpeed (KeySpeedAvg)
+    dvp: Optional[float]              # Δ vs Par (computed in tab)
+    lcp: str                          # High/Questionable/Unlikely/N/A
+
+@dataclass
+class Settings:
+    class_par: float = 77.0
+    distance_f: float = 7.0
+    lcp_high: float = -3.0
+    lcp_question_low: float = -8.0
+    wp_even: float = 0.5
+    wp_confident: float = 0.65
+
 PACEFIT = {
     "Slow":   {"Front": 5, "Prominent": 4, "Mid": 3, "Hold-up": 2},
     "Even":   {"Front": 4, "Prominent": 5, "Mid": 4, "Hold-up": 3},
     "Strong": {"Front": 2, "Prominent": 3, "Mid": 4, "Hold-up": 5},
     "Very Strong": {"Front": 1, "Prominent": 2, "Mid": 4, "Hold-up": 5},
 }
+PACEFIT_EVEN_FC = {"Front": 4.5, "Prominent": 5.0, "Mid": 3.5, "Hold-up": 2.5}
+PACEFIT_5F = {
+    "Slow":   {"Front": 5.0, "Prominent": 4.5, "Mid": 3.5, "Hold-up": 2.0},
+    "Even":   {"Front": 4.5, "Prominent": 5.0, "Mid": 3.5, "Hold-up": 2.5},
+    "Strong": {"Front": 3.5, "Prominent": 4.5, "Mid": 4.0, "Hold-up": 3.0},
+}
+PACEFIT_6F = {
+    "Slow":   {"Front": 5.0, "Prominent": 4.5, "Mid": 3.5, "Hold-up": 2.5},
+    "Even":   {"Front": 4.0, "Prominent": 5.0, "Mid": 4.0, "Hold-up": 3.0},
+    "Strong": {"Front": 3.0, "Prominent": 4.0, "Mid": 4.5, "Hold-up": 3.5},
+}
+
+def _dist_band(d: float) -> str:
+    if d <= 5.5: return "5f"
+    if d <= 6.5: return "6f"
+    return "route"
+
+def _lcp_from_dvp(style_cat: Optional[str], dvp: Optional[float], s: Settings) -> str:
+    if style_cat not in ("Front","Prominent") or dvp is None:
+        return "N/A"
+    if dvp >= s.lcp_high: return "High"
+    if dvp >= s.lcp_question_low: return "Questionable"
+    return "Unlikely"
 
 def _speed_score(dvp: Optional[float]) -> float:
-    # Light penalty for missing KeySpeedAvg (no Δ vs Par)
-    if dvp is None or pd.isna(dvp):
-        return 2.3
-    if dvp >= 2:
-        return 5.0
-    if dvp >= -1:
-        return 4.0
-    if dvp >= -4:
-        return 3.0
-    if dvp >= -8:
-        return 2.0
+    if dvp is None: return 2.3
+    if dvp >= 2:    return 5.0
+    if dvp >= -1:   return 4.0
+    if dvp >= -4:   return 3.0
+    if dvp >= -8:   return 2.0
     return 1.0
 
-def build_suitability_preview(merged: pd.DataFrame, scenario: str, wp: float, class_par: float) -> pd.DataFrame:
-    """
-    Minimal suitability using:
-      - RS_Cat from RS_Avg (5) only
-      - Δ vs Par from KeySpeedAvg - class_par
-      - PaceFit from selected scenario
-      - Suitability = PaceFit*wp + SpeedFit*(1-wp)
-    """
-    if merged.empty:
-        return pd.DataFrame()
+def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float,Dict[str,str],Dict[str,object]]:
+    debug = {"rules_applied": []}
+    if not rows: return "N/A", 0.0, {}, {"error": "no rows"}
 
-    df = merged.copy()
-    df["RS_Cat_used"] = df.get("RS_Cat")
-    df["ΔvsPar"] = df.get("KeySpeedAvg") - float(class_par)
+    d = pd.DataFrame([{"horse":r.horse, "style":r.style_cat, "dvp":r.dvp, "lcp":r.lcp} for r in rows])
 
-    pace_map = PACEFIT.get(scenario, PACEFIT["Even"])
-    df["PaceFit"] = df["RS_Cat_used"].map(pace_map).fillna(3).astype(float)
-    df["SpeedFit"] = df["ΔvsPar"].apply(_speed_score)
+    front_all = d[d["style"]=="Front"]; prom_all = d[d["style"]=="Prominent"]
+    front_high = d[(d["style"]=="Front") & (d["lcp"]=="High")]
+    prom_high  = d[(d["style"]=="Prominent") & (d["lcp"]=="High")]
+    front_q    = d[(d["style"]=="Front") & (d["lcp"]=="Questionable")]
+    prom_q     = d[(d["style"]=="Prominent") & (d["lcp"]=="Questionable")]
 
-    ws = 1 - float(wp)
-    df["wp"] = float(wp)
-    df["ws"] = ws
-    df["Suitability"] = (df["PaceFit"] * df["wp"] + df["SpeedFit"] * df["ws"]).round(1)
+    n_front, n_fh, n_ph, n_fq, n_pq = len(front_all), len(front_high), len(prom_high), len(front_q), len(prom_q)
 
-    show_cols = ["Horse","RS_Avg","RS_Avg10","RS_Cat_used","KeySpeedAvg","ΔvsPar","PaceFit","SpeedFit","wp","ws","Suitability"]
-    show_cols = [c for c in show_cols if c in df.columns]
-    out = df[show_cols].sort_values(["Suitability","SpeedFit"], ascending=False)
-    return out
+    W_FH, W_PH, W_FQ, W_PQ = 2.0, 0.8, 0.5, 0.2
+    energy = (W_FH*n_fh) + (W_PH*n_ph) + (W_FQ*n_fq) + (W_PQ*n_pq)
 
-# -------------------------------------------------
-# UI — Tabs
-# -------------------------------------------------
-TAB_MAIN, TAB_DEBUG = st.tabs(["All Inputs (2 boxes)", "Debug"])
+    if n_fh >= 2:                 scenario, conf = "Strong", 0.65; debug["rules_applied"].append("≥2 High Front → Strong")
+    elif (n_fh+n_ph)>=3 and energy>=3.2: scenario, conf = "Strong", 0.65; debug["rules_applied"].append("≥3 High early & energy≥3.2 → Strong")
+    elif energy >= 3.2:           scenario, conf = "Strong", 0.60; debug["rules_applied"].append("energy≥3.2 → Strong")
+    elif (n_fh+n_ph) >= 2:        scenario, conf = "Even", 0.60;  debug["rules_applied"].append("≥2 High early → Even")
+    elif (n_fh+n_ph) == 1 and (n_fq+n_pq) >= 1:
+                                   scenario, conf = "Even", 0.55;  debug["rules_applied"].append("1 High + Questionables → Even")
+    elif (n_fh+n_ph) == 1:        scenario, conf = "Even", 0.60;  debug["rules_applied"].append("1 High → Even")
+    elif (n_fq+n_pq) >= 1:        scenario, conf = "Slow", 0.60;  debug["rules_applied"].append("Only Questionables → Slow")
+    else:                         scenario, conf = "Slow", 0.70;  debug["rules_applied"].append("No credible early → Slow")
 
+    if n_front == 0 or n_fh == 0:
+        allow_strong = False
+        if n_ph >= 3:
+            try: allow_strong = float(prom_high["dvp"].mean()) >= -1.0
+            except Exception: allow_strong = False
+        if not allow_strong and scenario in ("Strong","Very Strong"):
+            scenario, conf = "Even", min(conf,0.60); debug["rules_applied"].append("No-front cap → Even")
+
+    if n_fh == 1 and n_ph <= 1:
+        try: lf = float(front_high["dvp"].iloc[0])
+        except Exception: lf = None
+        if (lf is not None) and (lf >= 2.0) and scenario in ("Strong","Very Strong"):
+            scenario, conf = "Even", max(conf,0.65); debug["rules_applied"].append("Dominant-front cap → Even")
+
+    if n_fh == 1:
+        try: lf2 = float(front_high["dvp"].iloc[0])
+        except Exception: lf2 = None
+        if (lf2 is None) or (lf2 <= 1.0):
+            if scenario in ("Strong","Very Strong"):
+                scenario, conf = "Even", max(conf,0.60); debug["rules_applied"].append("Single-front cap (≤+1) → Even")
+        if (lf2 is not None) and (lf2 <= -2.0) and (n_ph <= 1) and scenario == "Even":
+            scenario, conf = "Slow", max(conf,0.65); debug["rules_applied"].append("Single-front below par → Slow")
+
+    if n_front == 1:
+        try: anyf = float(front_all["dvp"].iloc[0])
+        except Exception: anyf = None
+        if (anyf is not None) and (anyf <= -8.0):
+            idx = max(0, ["Slow","Even","Strong","Very Strong"].index(scenario)-1)
+            scenario = ["Slow","Even","Strong","Very Strong"][idx]
+            conf = max(conf,0.65); debug["rules_applied"].append("Weak solo leader → downgrade")
+
+    band = _dist_band(s.distance_f)
+    if n_fh == 2 and scenario in ("Strong","Very Strong"):
+        debug["rules_applied"].append("Two High Fronts (kept)")
+
+    if band in ("5f","6f") and n_fh == 1 and n_ph <= 2:
+        try: lf = float(front_high["dvp"].iloc[0])
+        except Exception: lf = None
+        dvp_ok = -0.5 if band=="5f" else -1.0
+        energy_cap = 4.0 if band=="5f" else 3.6
+        if (lf is not None) and (lf >= dvp_ok) and (energy < energy_cap) and scenario in ("Strong","Very Strong"):
+            scenario, conf = "Even", max(conf,0.65); debug["rules_applied"].append("Sprint cap: Strong→Even")
+
+    # Front-controlled tag only on routes
+    front_controlled = False
+    if band == "route" and scenario == "Even" and n_fh == 1 and n_ph <= 1:
+        try: lf = float(front_high["dvp"].iloc[0])
+        except Exception: lf = None
+        if (lf is not None) and (lf >= -1.0):
+            scenario = "Even (Front-Controlled)"; front_controlled = True; debug["rules_applied"].append("Front-controlled tag")
+
+    debug["front_controlled"] = front_controlled
+    debug.update({"counts":{"Front_all":int(n_front),"Front_High":int(n_fh),"Prominent_High":int(n_ph)},
+                  "early_energy": float(energy), "distance_band": band})
+    lcp_map = dict(zip(d["horse"], d["lcp"]))
+    return scenario, conf, lcp_map, debug
+
+# =========================
+# Tabs UI
+# =========================
+TAB_MAIN, TAB_PACE = st.tabs(["All Inputs (2 boxes)", "Pace & Suitability (from Combined CSV)"])
+
+# ---------- TAB 1: All Inputs (2 boxes) ----------
 with TAB_MAIN:
     st.subheader("Box A — RS/OR/Class (single paste)")
-    st.caption("Paste the full block containing: Run Style Figure → Official Ratings → Race Class - Today: Class N £X.")
-    big = st.text_area("Box A paste", height=320, key="boxA")
+    st.caption("Paste: Run Style Figure → Official Ratings → Race Class - Today: Class N £X")
+    boxA = st.text_area("Box A paste", height=300, key="boxA")
 
     st.subheader("Box B — Boxes 4 & 5 (single paste)")
-    st.caption("Paste the single block that starts with the header row 'Horse Win % Form Figures (Avg) ...'.")
-    box45_raw = st.text_area("Box B paste", height=320, key="boxB")
+    st.caption("Paste the single block that starts with: 'Horse Win % Form Figures (Avg) ...'")
+    boxB = st.text_area("Box B paste", height=300, key="boxB")
 
     col_thr = st.columns(3)
     with col_thr[0]: front_thr = st.number_input("Front <", value=1.6, step=0.1)
@@ -490,112 +533,192 @@ with TAB_MAIN:
 
     if st.button("🚀 Process All (A + B)"):
         try:
-            # --- Box A ---
-            rs_text, or_text, rc_text = split_three_sections(big)
-            rs_df = parse_run_style(rs_text, front_thr, prom_thr, mid_thr)
-            or_df = parse_official_ratings(or_text)
-            rc_df, today_cls_val = parse_race_class(rc_text)
+            rs_txt, or_txt, rc_txt = split_three_sections(boxA)
+            rs_df = parse_run_style(rs_txt, front_thr, prom_thr, mid_thr)
+            or_df = parse_official_ratings(or_txt)
+            rc_df, today_cls_val = parse_race_class(rc_txt)
 
-            a1, a2, a3 = st.tabs(["RS ✓", "OR ✓", "Class ✓"])
-            with a1: st.dataframe(rs_df, use_container_width=True)
-            with a2: st.dataframe(or_df, use_container_width=True)
-            with a3:
-                st.write(f"Today Class £: **{today_cls_val if today_cls_val else 'n/a'}**")
-                st.dataframe(rc_df, use_container_width=True)
+            b_raw = parse_box45_single(boxB) if boxB.strip() else pd.DataFrame(columns=["Horse"])
+            b_df = build_speed_conditions(b_raw) if not b_raw.empty else pd.DataFrame(columns=["Horse"])
 
-            # --- Box B ---
-            base_b = parse_box45_single(box45_raw) if box45_raw.strip() else pd.DataFrame(columns=["Horse"])
-            if base_b.empty:
-                st.warning("Box B: No data parsed. Check the header and that each horse has 10 lines.")
-                b_out = pd.DataFrame(columns=["Horse"])
-            else:
-                b_out = build_speed_conditions(base_b)
-                st.markdown("### Boxes 4 & 5 → Speed & Conditions")
-                st.dataframe(b_out, use_container_width=True)
+            for d in (rs_df, or_df, rc_df, b_df):
+                if "Horse" in d.columns: d["Horse"] = d["Horse"].astype(str).str.strip()
 
-            # --- Merge everything
-            for dfm in (rs_df, or_df, rc_df, b_out):
-                if "Horse" in dfm.columns:
-                    dfm["Horse"] = dfm["Horse"].astype(str).str.strip()
             merged = rs_df.merge(or_df, on="Horse", how="outer") \
                           .merge(rc_df, on="Horse", how="outer") \
-                          .merge(b_out, on="Horse", how="outer")
+                          .merge(b_df, on="Horse", how="outer")
+
+            st.success("Parsed all sections ✓")
+            a, b, c, dtab = st.tabs(["Run Style ✓","Official Ratings ✓","Race Class ✓","Speed & Conditions ✓"])
+            with a: st.dataframe(rs_df, use_container_width=True)
+            with b: st.dataframe(or_df, use_container_width=True)
+            with c:
+                st.write(f"Today Class £: **{today_cls_val if today_cls_val else 'n/a'}**")
+                st.dataframe(rc_df, use_container_width=True)
+            with dtab: st.dataframe(b_df, use_container_width=True)
 
             st.markdown("## 🧩 Combined Output (A + B)")
             st.dataframe(merged, use_container_width=True)
-            st.download_button(
-                "💾 Download Combined CSV",
-                merged.to_csv(index=False),
-                "cleanpace_allinone_combined.csv",
-                mime="text/csv"
-            )
-
-            # -------- Suitability Preview --------
-            st.markdown("## ⭐ Suitability Score — Minimal Preview")
-            with st.expander("Configure preview", expanded=True):
-                c = st.columns(4)
-                scenario = c[0].selectbox("Pace Scenario", ["Slow","Even","Strong","Very Strong"], index=1)
-                wp = c[1].slider("Pace weight (wp)", 0.3, 0.8, 0.50, 0.05)
-                class_par = c[2].number_input("Class Par (for Δ vs Par)", value=77.0, step=0.5)
-                show_top_n = int(c[3].number_input("Show Top N", value=5, step=1, min_value=1))
-
-            suit_df = build_suitability_preview(merged, scenario, wp, class_par)
-            if suit_df.empty:
-                st.info("Suitability preview needs RS_Cat (from Box A) and KeySpeedAvg (from Box B).")
-            else:
-                st.dataframe(suit_df, use_container_width=True)
-                topN = suit_df.head(show_top_n)[["Horse","Suitability","RS_Cat_used","ΔvsPar"]]
-                st.markdown("### Top Picks")
-                for i, (_, r) in enumerate(topN.iterrows()):
-                    medal = ["🥇","🥈","🥉","4️⃣","5️⃣"][i] if i < 5 else f"{i+1}."
-                    st.write(f"{medal} **{r['Horse']}** — Score **{r['Suitability']}** | {r['RS_Cat_used']} | ΔvsPar {r['ΔvsPar']:.1f}")
-
+            st.download_button("💾 Download Combined CSV",
+                               merged.to_csv(index=False),
+                               "cleanpace_allinone_combined.csv",
+                               mime="text/csv")
         except Exception as e:
             st.error(f"Failed: {e}")
 
-with TAB_DEBUG:
-    st.subheader("Quick Parsers (use for troubleshooting)")
-    c1, c2 = st.columns(2)
+# ---------- TAB 2: Pace & Suitability ----------
+with TAB_PACE:
+    st.subheader("Upload 🧩 Combined Output (A + B) CSV")
+    upl = st.file_uploader("Combined CSV", type=["csv"], key="pace_csv")
 
-    with c1:
-        st.caption("Run Style Figure (only)")
-        rs_only = st.text_area("RS only", height=180, key="dbg_rs")
-        if st.button("Parse RS", key="dbg_prs"):
-            try:
-                st.dataframe(parse_run_style(rs_only), use_container_width=True)
-            except Exception as e:
-                st.error(e)
+    c = st.columns(6)
+    class_par = c[0].number_input("Class Par", value=77.0, step=0.5)
+    distance_f = c[1].number_input("Distance (f)", value=6.0, step=0.5, min_value=5.0)
+    wp_even    = c[2].slider("wp (Even/Uncertain)", 0.3, 0.8, 0.50, 0.05)
+    wp_conf    = c[3].slider("wp (Predictable Slow/Very Strong)", 0.3, 0.8, 0.65, 0.05)
+    show_top   = int(c[4].number_input("Show Top N", value=5, step=1, min_value=1))
+    pace_bonus = c[5].checkbox("Tag Even (Front-Controlled) routes", value=True)
 
-        st.caption("Official Ratings (only)")
-        or_only = st.text_area("OR only", height=180, key="dbg_or")
-        if st.button("Parse OR", key="dbg_por"):
-            try:
-                st.dataframe(parse_official_ratings(or_only), use_container_width=True)
-            except Exception as e:
-                st.error(e)
+    c2 = st.columns(4)
+    w_or   = c2[0].slider("OR context weight", 0.0, 0.6, 0.20, 0.05)
+    w_cls  = c2[1].slider("Class compat (ccs_5) weight", 0.0, 0.4, 0.10, 0.05)
+    w_cond = c2[2].slider("Conditions (place rates) weight", 0.0, 0.4, 0.10, 0.05)
+    clip5  = c2[3].checkbox("Clip final Suitability to 1–5", value=True)
 
-    with c2:
-        st.caption("Race Class - Today: ... (only)")
-        rc_only = st.text_area("Class only", height=180, key="dbg_rc")
-        if st.button("Parse Class", key="dbg_prc"):
-            try:
-                dfc, val = parse_race_class(rc_only)
-                st.write(f"Today Class £: {val}")
-                st.dataframe(dfc, use_container_width=True)
-            except Exception as e:
-                st.error(e)
+    if upl is not None:
+        try:
+            df = pd.read_csv(upl)
+            # Normalize key columns
+            for col in ["Horse","RS_Avg","AdjSpeed"]:
+                if col not in df.columns:
+                    st.error(f"Missing column in CSV: {col}")
+                    st.stop()
+            df["Horse"] = df["Horse"].astype(str).str.strip()
 
-        st.caption("Boxes 4 & 5 (single paste)")
-        b_only = st.text_area("Box 4/5 only", height=180, key="dbg_b45")
-        if st.button("Parse Box 4/5", key="dbg_pb45"):
-            try:
-                base_dbg = parse_box45_single(b_only)
-                st.markdown("**Parsed (name + 10 fields):**")
-                st.dataframe(base_dbg, use_container_width=True)
-                st.markdown("**Computed Speed & Conditions:**")
-                st.dataframe(build_speed_conditions(base_dbg), use_container_width=True)
-            except Exception as e:
-                st.error(e)
+            # Δ vs Par
+            df["ΔvsPar"] = df["AdjSpeed"] - class_par
 
-st.markdown("---")
-st.caption("Suitability = PaceFit × wp + SpeedFit × (1−wp). RS_Cat comes from RS_Avg (5 only). Δ vs Par uses KeySpeedAvg − Class Par.")
+            # Style category strictly from RS_Avg (per spec)
+            df["Style"] = df["RS_Avg"].apply(lambda x: _rs_category_from_value(x, 1.6, 2.4, 3.0))  # thresholds fixed here
+
+            # LCP from Δ vs Par only for Front/Prominent
+            s = Settings(class_par=class_par, distance_f=distance_f, wp_even=wp_even, wp_confident=wp_conf)
+            def _lcp_row(r):
+                return _lcp_from_dvp(r["Style"], r["ΔvsPar"], s)
+            df["LCP"] = df.apply(_lcp_row, axis=1)
+
+            # Build rows for pace projection
+            rows = []
+            for _, r in df.iterrows():
+                rows.append(HorseRow(
+                    horse=r["Horse"],
+                    style_cat=r["Style"],
+                    adj_speed=None if pd.isna(r["AdjSpeed"]) else float(r["AdjSpeed"]),
+                    dvp=None if pd.isna(r["ΔvsPar"]) else float(r["ΔvsPar"]),
+                    lcp=r["LCP"]
+                ))
+            scenario, conf, lcp_map, debug = project_pace_from_rows(rows, s)
+
+            # PaceFit maps
+            band = "5f" if distance_f <= 5.5 else ("6f" if distance_f <= 6.5 else "route")
+            if scenario.startswith("Even (Front-Controlled)") and band == "route":
+                pacefit_map = PACEFIT_EVEN_FC
+            elif band == "5f":
+                pacefit_map = PACEFIT_5F["Even"] if scenario.startswith("Even") else PACEFIT_5F.get(scenario, PACEFIT_5F["Even"])
+            elif band == "6f":
+                pacefit_map = PACEFIT_6F["Even"] if scenario.startswith("Even") else PACEFIT_6F.get(scenario, PACEFIT_6F["Even"])
+            else:
+                key = "Even" if scenario.startswith("Even") else scenario
+                pacefit_map = PACEFIT.get(key, PACEFIT["Even"])
+
+            # Pace/Speed weights
+            wp = s.wp_confident if (scenario in ("Slow","Very Strong") and conf >= 0.65) else s.wp_even
+            if band == "5f": wp = max(wp, 0.60)
+            elif band == "6f": wp = max(wp, 0.55)
+            ws = 1 - wp
+
+            # Base PaceFit & SpeedFit
+            df["PaceFit"]  = df["Style"].map(pacefit_map).fillna(3.0)
+            def _speedfit(v):
+                if pd.isna(v): return 2.3
+                v = float(v)
+                if v >= 2: return 5.0
+                if v >= -1: return 4.0
+                if v >= -4: return 3.0
+                if v >= -8: return 2.0
+                return 1.0
+            df["SpeedFit"] = df["ΔvsPar"].apply(_speedfit)
+
+            df["Suitability_Base"] = df["PaceFit"] * wp + df["SpeedFit"] * ws
+            df["wp"], df["ws"] = wp, ws
+            df["Scenario"], df["Confidence"] = scenario, conf
+
+            # OR context bonus (use rating_context_index if present; else craft light proxy)
+            if "rating_context_index" in df.columns:
+                rci = df["rating_context_index"].astype(float)
+            else:
+                # proxy from today_or vs max_or_10 (if present)
+                if {"today_or","max_or_10"}.issubset(df.columns):
+                    proxy = (df["max_or_10"] - df["today_or"]).clip(-12, 12) / 12.0 * 5  # scale to ~1..5
+                    rci = proxy.fillna(3.0)
+                else:
+                    rci = pd.Series([3.0]*len(df))
+            df["OR_Bonus"] = (rci - 3.0) / 2.0 * w_or  # centered ~0, range ~±(w_or)
+
+            # Progressive tolerance: if unexposed & above max mark, dampen negatives
+            if {"handicap_runs","today_or","max_or_10"}.issubset(df.columns):
+                mask_prog = (df["handicap_runs"].fillna(99) < 6) & (df["today_or"] > df["max_or_10"])
+                df.loc[mask_prog, "OR_Bonus"] = df.loc[mask_prog, "OR_Bonus"] + 0.05
+
+            # Class compatibility bonus from ccs_5
+            if "ccs_5" in df.columns:
+                df["Class_Bonus"] = ((df["ccs_5"].astype(float) - 3.0) / 2.0) * w_cls
+            else:
+                df["Class_Bonus"] = 0.0
+
+            # Conditions bonus: average of available place rates
+            cond_cols = [c for c in ["dist_place","cls_place","runpm1_place","trackstyle_place","crs_place","lhrh_place","going_place"] if c in df.columns]
+            if cond_cols:
+                df["_cond_mean"] = df[cond_cols].astype(float).mean(axis=1, skipna=True)
+                # center ~0.2 as neutral; scale softly
+                df["Cond_Bonus"] = ((df["_cond_mean"] - 0.2) * 0.5).fillna(0.0) * (w_cond / 0.5)
+            else:
+                df["Cond_Bonus"] = 0.0
+
+            df["Suitability"] = df["Suitability_Base"] + df["OR_Bonus"] + df["Class_Bonus"] + df["Cond_Bonus"]
+            if clip5:
+                df["Suitability"] = df["Suitability"].clip(1.0, 5.0)
+
+            show_cols = ["Horse","RS_Avg","RS_Avg10","Style","AdjSpeed","ΔvsPar","LCP",
+                         "PaceFit","SpeedFit","wp","ws","Suitability_Base",
+                         "OR_Bonus","Class_Bonus","Cond_Bonus","Suitability",
+                         "Scenario","Confidence"]
+            extra_cols = [c for c in ["today_or","max_or_10","handicap_runs","ccs_5","dist_place","cls_place","runpm1_place","trackstyle_place"] if c in df.columns]
+            out = df[show_cols + extra_cols].sort_values(["Suitability","Suitability_Base","SpeedFit"], ascending=False)
+
+            st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f}) — Distance band: {'5f' if distance_f<=5.5 else ('6f' if distance_f<=6.5 else 'route')}")
+            with st.expander("Why this pace? (Reason used)", expanded=True):
+                counts = debug.get("counts", {})
+                st.markdown(
+                    f"- **Front (High):** {counts.get('Front_High',0)} &nbsp;&nbsp; "
+                    f"**Prominent (High):** {counts.get('Prominent_High',0)}  \n"
+                    f"- **Early energy:** {debug.get('early_energy',0.0):.2f} &nbsp;&nbsp; "
+                    f"**Front-controlled tag:** {debug.get('front_controlled', False)}"
+                )
+                rules = debug.get("rules_applied", [])
+                if rules:
+                    st.markdown("**Rules applied:**")
+                    for r in rules: st.write(f"• {r}")
+
+            st.markdown("### Suitability Ratings (enriched)")
+            st.dataframe(out.head(show_top), use_container_width=True)
+
+            st.download_button(
+                "💾 Download Suitability CSV",
+                out.to_csv(index=False),
+                "paceform_suitability.csv",
+                mime="text/csv"
+            )
+
+        except Exception as e:
+            st.error(f"Failed to process CSV: {e}")
