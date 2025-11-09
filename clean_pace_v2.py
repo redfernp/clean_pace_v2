@@ -2,7 +2,7 @@
 # One main tab with TWO paste boxes:
 #  Box A: Run Style + Official Ratings + Race Class (single paste; auto-split)
 #  Box B: Boxes 4 & 5 combined (speed + conditions in one paste)
-# Plus a Debug tab that exposes the individual parsers.
+# Adds a minimal Suitability Score preview (pace scenario + weights + class par).
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import streamlit as st
 # -------------------------------------------------
 st.set_page_config(page_title="CleanPace v2 — All-in-One", page_icon="🏇", layout="wide")
 st.title("🏇 CleanPace v2 — All-in-One Normaliser")
-st.caption("Box A: RS/OR/Class (single paste). Box B: Boxes 4&5 (Speed + Conditions). One click → combined CSV.")
+st.caption("Box A: RS/OR/Class (single paste). Box B: Boxes 4&5 (Speed + Conditions). One click → combined CSV + Suitability preview.")
 
 # -------------------------------------------------
 # Generic helpers
@@ -417,6 +417,59 @@ def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
     return out[keep]
 
 # -------------------------------------------------
+# Suitability Preview Helpers
+# -------------------------------------------------
+PACEFIT = {
+    "Slow":   {"Front": 5, "Prominent": 4, "Mid": 3, "Hold-up": 2},
+    "Even":   {"Front": 4, "Prominent": 5, "Mid": 4, "Hold-up": 3},
+    "Strong": {"Front": 2, "Prominent": 3, "Mid": 4, "Hold-up": 5},
+    "Very Strong": {"Front": 1, "Prominent": 2, "Mid": 4, "Hold-up": 5},
+}
+
+def _speed_score(dvp: Optional[float]) -> float:
+    # Light penalty for missing KeySpeedAvg (no Δ vs Par)
+    if dvp is None or pd.isna(dvp):
+        return 2.3
+    if dvp >= 2:
+        return 5.0
+    if dvp >= -1:
+        return 4.0
+    if dvp >= -4:
+        return 3.0
+    if dvp >= -8:
+        return 2.0
+    return 1.0
+
+def build_suitability_preview(merged: pd.DataFrame, scenario: str, wp: float, class_par: float) -> pd.DataFrame:
+    """
+    Minimal suitability using:
+      - RS_Cat from RS_Avg (5) only
+      - Δ vs Par from KeySpeedAvg - class_par
+      - PaceFit from selected scenario
+      - Suitability = PaceFit*wp + SpeedFit*(1-wp)
+    """
+    if merged.empty:
+        return pd.DataFrame()
+
+    df = merged.copy()
+    df["RS_Cat_used"] = df.get("RS_Cat")
+    df["ΔvsPar"] = df.get("KeySpeedAvg") - float(class_par)
+
+    pace_map = PACEFIT.get(scenario, PACEFIT["Even"])
+    df["PaceFit"] = df["RS_Cat_used"].map(pace_map).fillna(3).astype(float)
+    df["SpeedFit"] = df["ΔvsPar"].apply(_speed_score)
+
+    ws = 1 - float(wp)
+    df["wp"] = float(wp)
+    df["ws"] = ws
+    df["Suitability"] = (df["PaceFit"] * df["wp"] + df["SpeedFit"] * df["ws"]).round(1)
+
+    show_cols = ["Horse","RS_Avg","RS_Avg10","RS_Cat_used","KeySpeedAvg","ΔvsPar","PaceFit","SpeedFit","wp","ws","Suitability"]
+    show_cols = [c for c in show_cols if c in df.columns]
+    out = df[show_cols].sort_values(["Suitability","SpeedFit"], ascending=False)
+    return out
+
+# -------------------------------------------------
 # UI — Tabs
 # -------------------------------------------------
 TAB_MAIN, TAB_DEBUG = st.tabs(["All Inputs (2 boxes)", "Debug"])
@@ -430,16 +483,15 @@ with TAB_MAIN:
     st.caption("Paste the single block that starts with the header row 'Horse Win % Form Figures (Avg) ...'.")
     box45_raw = st.text_area("Box B paste", height=320, key="boxB")
 
-    col = st.columns(3)
-    with col[0]: front_thr = st.number_input("Front <", value=1.6, step=0.1)
-    with col[1]: prom_thr  = st.number_input("Prominent <", value=2.4, step=0.1)
-    with col[2]: mid_thr   = st.number_input("Mid <", value=3.0, step=0.1)
+    col_thr = st.columns(3)
+    with col_thr[0]: front_thr = st.number_input("Front <", value=1.6, step=0.1)
+    with col_thr[1]: prom_thr  = st.number_input("Prominent <", value=2.4, step=0.1)
+    with col_thr[2]: mid_thr   = st.number_input("Mid <", value=3.0, step=0.1)
 
     if st.button("🚀 Process All (A + B)"):
         try:
             # --- Box A ---
             rs_text, or_text, rc_text = split_three_sections(big)
-
             rs_df = parse_run_style(rs_text, front_thr, prom_thr, mid_thr)
             or_df = parse_official_ratings(or_text)
             rc_df, today_cls_val = parse_race_class(rc_text)
@@ -477,6 +529,26 @@ with TAB_MAIN:
                 "cleanpace_allinone_combined.csv",
                 mime="text/csv"
             )
+
+            # -------- Suitability Preview --------
+            st.markdown("## ⭐ Suitability Score — Minimal Preview")
+            with st.expander("Configure preview", expanded=True):
+                c = st.columns(4)
+                scenario = c[0].selectbox("Pace Scenario", ["Slow","Even","Strong","Very Strong"], index=1)
+                wp = c[1].slider("Pace weight (wp)", 0.3, 0.8, 0.50, 0.05)
+                class_par = c[2].number_input("Class Par (for Δ vs Par)", value=77.0, step=0.5)
+                show_top_n = int(c[3].number_input("Show Top N", value=5, step=1, min_value=1))
+
+            suit_df = build_suitability_preview(merged, scenario, wp, class_par)
+            if suit_df.empty:
+                st.info("Suitability preview needs RS_Cat (from Box A) and KeySpeedAvg (from Box B).")
+            else:
+                st.dataframe(suit_df, use_container_width=True)
+                topN = suit_df.head(show_top_n)[["Horse","Suitability","RS_Cat_used","ΔvsPar"]]
+                st.markdown("### Top Picks")
+                for i, (_, r) in enumerate(topN.iterrows()):
+                    medal = ["🥇","🥈","🥉","4️⃣","5️⃣"][i] if i < 5 else f"{i+1}."
+                    st.write(f"{medal} **{r['Horse']}** — Score **{r['Suitability']}** | {r['RS_Cat_used']} | ΔvsPar {r['ΔvsPar']:.1f}")
 
         except Exception as e:
             st.error(f"Failed: {e}")
@@ -526,4 +598,4 @@ with TAB_DEBUG:
                 st.error(e)
 
 st.markdown("---")
-st.caption("Outputs: RS_Avg (5 only) & RS_Avg10, OR context with unexposed tolerance, Class CD/CCS, and Speed+Conditions (Boxes 4&5). Merge is keyed by 'Horse'.")
+st.caption("Suitability = PaceFit × wp + SpeedFit × (1−wp). RS_Cat comes from RS_Avg (5 only). Δ vs Par uses KeySpeedAvg − Class Par.")
