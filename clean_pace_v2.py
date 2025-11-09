@@ -1,12 +1,7 @@
 # clean_pace_v2_threeinone.py
-# One paste → split into:
-#   1) Run Style Figure
-#   2) Official Ratings (with unexposed logic + highest-winning OR by code)
-#   3) Race Class - Today: Class N £X
-# Then preview and export a combined CSV.
-#
-# Tab 3 adds Box 4 (Speed) + Box 5 (Conditions) parsing and merge.
-# Tab 4 gives debug parsers for Box 4 and Box 5 in isolation.
+# Tabs 1–2: Run Style + Official Ratings + Race Class (3-in-1) — unchanged logic
+# Tab 3: Boxes 4 & 5 combined in ONE paste (speed + conditions)
+# Tab 4: Debug for the combined Box 4/5 format
 
 from __future__ import annotations
 
@@ -21,9 +16,9 @@ import streamlit as st
 # -------------------------------------------------
 # App Meta
 # -------------------------------------------------
-st.set_page_config(page_title="CleanPace v2 — 3-in-1 Splitter + Speed/Conditions", page_icon="🏇", layout="wide")
-st.title("🏇 CleanPace v2 — Single Paste (RS + OR + Class)  •  + Speed/Conditions Tabs")
-st.caption("Tabs 1–2 parse Run Style / Official Ratings / Race Class. Tabs 3–4 parse Box 4 (Speed) + Box 5 (Conditions).")
+st.set_page_config(page_title="CleanPace v2 — 3-in-1 + Boxes 4/5", page_icon="🏇", layout="wide")
+st.title("🏇 CleanPace v2 — RS/OR/Class  •  + Boxes 4/5 (Speed + Conditions)")
+st.caption("Tabs 1–2 parse Run Style / Official Ratings / Race Class. Tab 3 parses Boxes 4 & 5 from a single paste. Tab 4 is a debug view.")
 
 # -------------------------------------------------
 # Generic helpers
@@ -69,14 +64,6 @@ def _numbers(s: str) -> List[float]:
 # Splitter for the 3-in-1 paste
 # -------------------------------------------------
 def split_three_sections(raw: str) -> Tuple[str, str, str]:
-    """
-    Split big pasted text into (run_style, official_ratings, race_class) sections.
-    Anchors (case-insensitive):
-      - 'Run Style Figure'
-      - 'Official Ratings'
-      - 'Race Class - Today'
-    Must appear in that order.
-    """
     text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
 
     def find_idx(pattern: str) -> int:
@@ -137,16 +124,6 @@ def _parse_or_rating_line(s: str) -> Optional[int]:
     return int(m.group(0)) if m else None
 
 def parse_official_ratings(or_text: str) -> pd.DataFrame:
-    """
-    Parses the 'Official Ratings' block and computes:
-      - today_or, max_or_10, or_3back, re_lb, d_or_trend, ts_5
-      - handicap_runs (count of valid trailing ORs; proxy for exposure)
-      - hwin_or (highest winning OR for THIS race type if supplied via 'Highest' col)
-      - delta_hwin_code (hwin_or - today_or), delta_hwin_adj (exposure-tolerant)
-      - rating_fit_code_5, rating_fit_code_adj_5
-      - ts_5_adj for unexposed rising above max_or_10
-      - rating_context_index = 0.7*ts_5_adj + 0.3*rating_fit_code_adj_5
-    """
     lines = [l for l in or_text.splitlines() if l.strip()]
     if lines and lines[0].strip().lower().startswith("official ratings"):
         lines = lines[1:]
@@ -269,13 +246,8 @@ def parse_official_ratings(or_text: str) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
-# 3) Race Class / Prize
+# 3) Race Class / Prize  (supports table or block)
 def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
-    """
-    Supports:
-      A) Tabular: 'Horse' plus 'Avg 3' / 'Avg 5' columns
-      B) Block: per-horse lines followed by two money lines (Avg3, Avg5)
-    """
     lines = rc_text.splitlines()
     today_class_value = None
     if lines and lines[0].strip().lower().startswith("race class - today"):
@@ -286,7 +258,7 @@ def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
     else:
         rc_text_body = rc_text
 
-    # try tabular
+    # try tabular first
     def _try_tabular(text: str) -> Optional[pd.DataFrame]:
         try:
             df = _read_table_guess(text)
@@ -314,7 +286,7 @@ def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
         df_out["ccs_5"] = df_out["cd"].apply(ccs_from_cd)
         return df_out[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_class_value
 
-    # fallback: block parsing
+    # block parsing (horse line then money lines, last two are Avg3/Avg5)
     body_lines = [ln for ln in rc_text_body.splitlines() if ln.strip()]
     if body_lines and body_lines[0].strip().lower().startswith("horse"):
         body_lines = body_lines[1:]
@@ -365,38 +337,31 @@ def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
     return df_blk[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_class_value
 
 # -------------------------------------------------
-# Box 4 & 5 parsers (Tabs 3–4)
+# Box 4 & 5 combined parser (single paste)
 # -------------------------------------------------
-BOX_KEYS = {
-    "win %": "win_pct",
-    "form figures (avg)": "form_avg",
-    "speed figures (avg)": "speed_series",
-    "crs %": "crs",
-    "dist %": "dist",
-    "lhrh %": "lhrh",
-    "going %": "going",
-    "class %": "cls",
-    "run. +/-1 %": "runpm1",
-    "trackstyle %": "trackstyle",
-}
-
-def _is_key(line: str) -> bool:
-    t = line.strip().lower()
-    return t in BOX_KEYS
+BOX_ORDER = [
+    "win_pct",      # e.g., 22 (2/2/9)
+    "form_avg",     # e.g., 5, 2, 1, 1, 5, 6, 10, 2, 5 (4)
+    "speed_series", # e.g., 64, 70, ... (67)
+    "crs",          # e.g., 20 (1/2/5)
+    "dist",
+    "lhrh",
+    "going",
+    "cls",
+    "runpm1",
+    "trackstyle"
+]
 
 def _looks_like_name(line: str) -> bool:
     t = line.strip()
     if not t: return False
-    # not a key and not purely numeric/value-ish
-    if _is_key(t.lower()): return False
-    if re.search(r"[£,()/\d]", t): return False
+    # not a header, not a number-only, not starting with '(' or '£'
+    if t.lower().startswith("horse"): return False
+    if re.fullmatch(r"[\d\W_]+", t): return False
+    if t.startswith("(") or t.startswith("£"): return False
     return True
 
 def _parse_wpt_value(val: str) -> Tuple[Optional[float], Optional[int], Optional[int], Optional[int]]:
-    """
-    Parse strings like '22 (2/0/9)' or '0 (0/0/1)'.
-    Returns (place_rate, w, p, t) where place_rate=(w+p)/t.
-    """
     val = str(val).strip()
     m = re.search(r"\((\d+)\s*/\s*(\d+)\s*/\s*(\d+)\)", val)
     if not m:
@@ -410,132 +375,109 @@ def _parse_wpt_value(val: str) -> Tuple[Optional[float], Optional[int], Optional
     return place, w, p, t
 
 def _parse_speed_series(s: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-    """
-    From a line like '68, 73, 81, 74, ... (71)' extract the series and compute:
-      last, highest, avg_last_3, avg_all
-    """
     nums = _numbers(s)
     if not nums:
         return None, None, None, None
-    series = nums  # includes the values; final parentheses avg we will recompute anyway
-    last = series[-1]
-    highest = max(series)
-    avg_last_3 = round(sum(series[-3:])/min(3, len(series)), 1)
-    avg_all = round(sum(series)/len(series), 1)
+    last = nums[-1]
+    highest = max(nums)
+    avg_last_3 = round(sum(nums[-3:])/min(3, len(nums)), 1)
+    avg_all = round(sum(nums)/len(nums), 1)
     return last, highest, avg_last_3, avg_all
 
-def parse_box_blocks(raw: str) -> pd.DataFrame:
+def parse_box45_single(raw: str) -> pd.DataFrame:
     """
-    Robust parser for Box 4/5 blocks (name line, then key/value pairs).
-    Returns a wide DF keyed by Horse.
+    Parse Box 4/5 combined single paste.
+    Expect structure:
+      Header line starts with 'Horse'
+      For each horse:
+        line 1: horse name
+        next 10 lines in order of BOX_ORDER
     """
     lines = [ln for ln in raw.replace("\r\n","\n").replace("\r","\n").split("\n") if ln.strip()]
-    # skip the possible header line starting with 'Horse'
-    if lines and lines[0].strip().lower().startswith("horse"):
+    if not lines:
+        return pd.DataFrame(columns=["Horse"])
+
+    # drop header if present
+    if lines[0].strip().lower().startswith("horse"):
         lines = lines[1:]
 
     i, n = 0, len(lines)
-    records: List[Dict[str, object]] = []
+    recs: List[Dict[str, object]] = []
 
     while i < n:
-        # find a name
+        # find next horse name
         while i < n and not _looks_like_name(lines[i]):
             i += 1
-        if i >= n: break
+        if i >= n:
+            break
+
         name = lines[i].strip()
         i += 1
 
-        data: Dict[str, object] = {"Horse": name}
+        values: List[str] = []
+        # take next up to 10 non-empty lines as ordered values
+        while i < n and len(values) < 10:
+            if _looks_like_name(lines[i]):  # next horse encountered early
+                break
+            values.append(lines[i].strip())
+            i += 1
 
-        # read key/value pairs until next name-like line
-        while i < n and not _looks_like_name(lines[i]):
-            key_line = lines[i].strip().lower()
-            if _is_key(key_line) and i + 1 < n:
-                raw_val = lines[i+1].strip()
-                data[BOX_KEYS[key_line]] = raw_val
-                i += 2
-            else:
-                i += 1
+        # pad if short; trim if long
+        if len(values) < 10:
+            values += [None] * (10 - len(values))
+        else:
+            values = values[:10]
 
-        records.append(data)
+        data = {"Horse": name}
+        for key, val in zip(BOX_ORDER, values):
+            data[key] = val
+        recs.append(data)
 
-    if not records:
-        return pd.DataFrame(columns=["Horse"])
-
-    df = pd.DataFrame(records)
+    df = pd.DataFrame(recs)
+    if df.empty:
+        return df
     df["Horse"] = df["Horse"].astype(str).str.strip()
     return df
 
-def parse_box4_speed(raw: str) -> pd.DataFrame:
+def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute adjusted speed fields from Box 4.
+    From the parsed Box 4/5 DF, compute:
+      - LastRace, Highest, Avg3, AvgAll, KeySpeedAvg (from speed_series)
+      - *_place columns from W/P/T strings for crs, dist, lhrh, going, cls, runpm1, trackstyle
     """
-    df = parse_box_blocks(raw)
-    if df.empty:
-        return df
+    if df_raw.empty:
+        return df_raw
 
-    # Speed series into metrics
-    metrics = df.get("speed_series")
+    # Speed series → metrics
     last_list, high_list, avg3_list, all_list, keyavg_list = [], [], [], [], []
-    for s in metrics if metrics is not None else []:
-        last, high, avg3, avgall = _parse_speed_series(s or "")
+    for s in df_raw["speed_series"].fillna(""):
+        last, high, avg3, avgall = _parse_speed_series(s)
         last_list.append(last)
         high_list.append(high)
         avg3_list.append(avg3)
         all_list.append(avgall)
-        if last is None or high is None or avg3 is None:
-            keyavg_list.append(None)
-        else:
-            keyavg_list.append(round((last + high + avg3)/3, 1))
+        keyavg_list.append(None if (last is None or high is None or avg3 is None) else round((last+high+avg3)/3, 1))
 
-    df["LastRace"] = last_list
-    df["Highest"]  = high_list
-    df["Avg3"]     = avg3_list
-    df["AvgAll"]   = all_list
-    df["KeySpeedAvg"] = keyavg_list
+    out = df_raw.copy()
+    out["LastRace"] = last_list
+    out["Highest"]  = high_list
+    out["Avg3"]     = avg3_list
+    out["AvgAll"]   = all_list
+    out["KeySpeedAvg"] = keyavg_list
 
-    keep = ["Horse","LastRace","Highest","Avg3","AvgAll","KeySpeedAvg"]
-    return df[keep]
-
-def parse_box5_conditions(raw: str) -> pd.DataFrame:
-    """
-    Extract place-rates for conditions facets from Box 5.
-    Produces *_place columns (0..1). Also keeps raw strings for reference.
-    """
-    df = parse_box_blocks(raw)
-    if df.empty:
-        return df
-
-    facets = {
-        "crs": "crs_place",
-        "dist": "dist_place",
-        "lhrh": "lhrh_place",
-        "going": "going_place",
-        "cls": "class_place",
-        "runpm1": "runpm1_place",
-        "trackstyle": "trackstyle_place",
-    }
-
-    for src, dst in facets.items():
-        if src in df.columns:
-            places, wins, places_only, totals = [], [], [], []
-            for v in df[src].fillna(""):
+    # Facet place-rates
+    for col in ["crs","dist","lhrh","going","cls","runpm1","trackstyle"]:
+        if col in out.columns:
+            places = []
+            for v in out[col].fillna(""):
                 pr, w, p, t = _parse_wpt_value(v)
                 places.append(pr)
-                wins.append(w)
-                places_only.append(p)
-                totals.append(t)
-            df[dst] = places
-            # Keep raw W/P/T counts if you want them later
-            df[src+"_W"] = wins
-            df[src+"_P"] = places_only
-            df[src+"_T"] = totals
+            out[f"{col}_place"] = places
 
-    keep_cols = ["Horse"] + [c for c in df.columns if c.endswith("_place")]
-    # retain raw strings for audit if desired:
-    raw_cols = ["crs","dist","lhrh","going","cls","runpm1","trackstyle"]
-    keep_cols += [c for c in raw_cols if c in df.columns]
-    return df[keep_cols]
+    keep = ["Horse","LastRace","Highest","Avg3","AvgAll","KeySpeedAvg",
+            "crs_place","dist_place","lhrh_place","going_place","cls_place","runpm1_place","trackstyle_place"]
+    keep = [c for c in keep if c in out.columns]
+    return out[keep]
 
 # -------------------------------------------------
 # UI — Tabs
@@ -543,8 +485,8 @@ def parse_box5_conditions(raw: str) -> pd.DataFrame:
 TAB1, TAB2, TAB3, TAB4 = st.tabs([
     "Single Paste (auto-split)",
     "Manual 3-box (debug)",
-    "Speed & Conditions (Boxes 4 & 5)",
-    "Speed/Cond Debug"
+    "Boxes 4 & 5 (single paste)",
+    "Boxes 4/5 Debug"
 ])
 
 # ----- TAB 1
@@ -574,9 +516,8 @@ with TAB1:
                 st.write(f"Today Class £: **{today_cls_val if today_cls_val else 'n/a'}**")
                 st.dataframe(rc_df, use_container_width=True)
 
-            # Combine (outer joins on Horse)
-            for df in (rs_df, or_df, rc_df):
-                df["Horse"] = df["Horse"].astype(str).str.strip()
+            for dfm in (rs_df, or_df, rc_df):
+                dfm["Horse"] = dfm["Horse"].astype(str).str.strip()
             merged = rs_df.merge(or_df, on="Horse", how="outer").merge(rc_df, on="Horse", how="outer")
 
             st.markdown("### 🧩 Combined Output")
@@ -620,73 +561,47 @@ with TAB2:
         except Exception as e:
             st.error(e)
 
-# ----- TAB 3
+# ----- TAB 3: Boxes 4 & 5 combined
 with TAB3:
-    st.subheader("Speed & Conditions (Boxes 4 & 5)")
-    st.caption("Paste **Box 4** (Speed blocks) on the left, **Box 5** (Conditions blocks) on the right.")
+    st.subheader("Boxes 4 & 5 (single paste)")
+    st.caption("Paste the **single** block that begins with the header row 'Horse Win % Form Figures (Avg) ...'.")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        box4_raw = st.text_area("Box 4 — Adjusted Speed blocks", height=280, key="box4")
-    with c2:
-        box5_raw = st.text_area("Box 5 — Conditions blocks", height=280, key="box5")
+    box45_raw = st.text_area("Paste Boxes 4 & 5", height=340, key="box45")
 
-    if st.button("🚀 Process Boxes 4 + 5"):
+    if st.button("🚀 Process Boxes 4 & 5 (single)"):
         try:
-            sp_df = parse_box4_speed(box4_raw) if box4_raw.strip() else pd.DataFrame(columns=["Horse"])
-            cond_df = parse_box5_conditions(box5_raw) if box5_raw.strip() else pd.DataFrame(columns=["Horse"])
-
-            t1, t2, t3 = st.tabs(["Box 4 ✓", "Box 5 ✓", "Merged ✓"])
-            with t1:
-                if sp_df.empty: st.info("No Box 4 data parsed.")
-                else: st.dataframe(sp_df, use_container_width=True)
-            with t2:
-                if cond_df.empty: st.info("No Box 5 data parsed.")
-                else: st.dataframe(cond_df, use_container_width=True)
-            with t3:
-                if sp_df.empty and cond_df.empty:
-                    st.info("Nothing to merge.")
-                else:
-                    for df in (sp_df, cond_df):
-                        if "Horse" in df.columns:
-                            df["Horse"] = df["Horse"].astype(str).str.strip()
-                    merged_sc = pd.merge(sp_df, cond_df, on="Horse", how="outer")
-                    st.dataframe(merged_sc, use_container_width=True)
-                    st.download_button(
-                        "💾 Download Speed+Conditions CSV",
-                        merged_sc.to_csv(index=False),
-                        "cleanpace_speed_conditions.csv",
-                        mime="text/csv"
-                    )
+            base = parse_box45_single(box45_raw) if box45_raw.strip() else pd.DataFrame(columns=["Horse"])
+            if base.empty:
+                st.info("No data parsed. Check that the first line starts with 'Horse' and that each horse has 10 lines of values.")
+            else:
+                out = build_speed_conditions(base)
+                st.success("Parsed ✔")
+                st.dataframe(out, use_container_width=True)
+                st.download_button(
+                    "💾 Download Speed+Conditions CSV",
+                    out.to_csv(index=False),
+                    "cleanpace_speed_conditions.csv",
+                    mime="text/csv"
+                )
         except Exception as e:
             st.error(f"Failed: {e}")
 
-# ----- TAB 4
+# ----- TAB 4: Debug for combined Boxes 4/5
 with TAB4:
-    st.subheader("Speed/Cond Debug")
-    st.caption("Parse each box individually to troubleshoot formatting.")
-
-    left, right = st.columns(2)
-    with left:
-        raw4 = st.text_area("Box 4 — Adjusted Speed (only)", height=240, key="raw4")
-        if st.button("Parse Box 4", key="p4"):
-            try:
-                df4 = parse_box4_speed(raw4)
-                st.dataframe(df4, use_container_width=True)
-            except Exception as e:
-                st.error(e)
-    with right:
-        raw5 = st.text_area("Box 5 — Conditions (only)", height=240, key="raw5")
-        if st.button("Parse Box 5", key="p5"):
-            try:
-                df5 = parse_box5_conditions(raw5)
-                st.dataframe(df5, use_container_width=True)
-            except Exception as e:
-                st.error(e)
+    st.subheader("Boxes 4/5 Debug")
+    dbg_raw = st.text_area("Paste the combined Box 4/5 block (same as Tab 3)", height=260, key="dbg45")
+    if st.button("Parse (Debug)"):
+        try:
+            df_dbg = parse_box45_single(dbg_raw)
+            st.markdown("**Raw parsed (name + 10 ordered fields):**")
+            st.dataframe(df_dbg, use_container_width=True)
+            st.markdown("**Computed Speed & Conditions:**")
+            st.dataframe(build_speed_conditions(df_dbg), use_container_width=True)
+        except Exception as e:
+            st.error(e)
 
 st.markdown("---")
 st.caption(
-    "Notes: RS_Avg uses Lto1–Lto5 (ignoring 0s). Official Ratings include unexposed handling and highest-winning OR by code. "
-    "Race Class supports table or block formats. Box 4 computes Last/Highest/Avg3/AvgAll + KeySpeedAvg. "
-    "Box 5 converts W/P/T strings into facet place-rates (e.g., dist_place, class_place)."
+    "Notes: RS_Avg uses Lto1–Lto5 (ignoring 0s). OR adds unexposed tolerance and highest-winning OR by code. "
+    "Race Class supports table or block. Boxes 4/5 parser assumes: name line followed by 10 lines in the fixed order."
 )
