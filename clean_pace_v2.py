@@ -54,9 +54,7 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 def map_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """
-    Return the first existing column whose normalized name matches one of the candidates (normalized).
-    """
+    """Return first column whose normalized name matches a candidate."""
     norm_map = {_norm(c): c for c in df.columns}
     for cand in candidates:
         key = _norm(cand)
@@ -301,17 +299,41 @@ def parse_race_class(rc_text: str) -> Tuple[pd.DataFrame, Optional[float]]:
     return df_blk[["Horse","avg3_prize","avg5_prize","today_class_value","cd","ccs_5"]], today_val
 
 # =========================
-# Boxes 4 & 5 (single paste)
+# Boxes 4 & 5 (single paste) — Robust name detection
 # =========================
 BOX_ORDER = ["win_pct", "form_avg", "speed_series", "crs", "dist", "lhrh", "going", "cls", "runpm1", "trackstyle"]
 
-def _looks_like_name(line: str) -> bool:
-    t = line.strip()
-    if not t: return False
-    if t.lower().startswith("horse"): return False
-    if re.fullmatch(r"[\d\W_]+", t): return False
-    if t.startswith("(") or t.startswith("£"): return False
-    return True
+def _is_win_line(s: str) -> bool:
+    """True if line looks like a Win % row such as '22 (2/2/9)'."""
+    return bool(re.search(r"\(\s*\d+\s*/\s*\d+\s*/\s*\d+\s*\)", str(s)))
+
+def _looks_like_name(line_or_list, idx: Optional[int] = None) -> bool:
+    """
+    Treat a line as a horse name only if:
+      • it has no digits, commas, parentheses, slashes or £
+      • the next non-empty line looks like a Win % line '(W/P/T)'
+    This prevents lines like '1, B, 2, 2, 2, 8 (4)' being tagged as names.
+    """
+    if isinstance(line_or_list, list):
+        lines = line_or_list
+        if idx is None or idx < 0 or idx >= len(lines):
+            return False
+        t = lines[idx].strip()
+        if not t or t.lower().startswith("horse"):
+            return False
+        if re.search(r"[0-9(),/£]", t):
+            return False
+        j = idx + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        return _is_win_line(lines[j]) if j < len(lines) else False
+    else:
+        t = str(line_or_list).strip()
+        if not t or t.lower().startswith("horse"):
+            return False
+        if re.search(r"[0-9(),/£]", t):
+            return False
+        return True
 
 def _parse_wpt_value(val: str) -> Tuple[Optional[float], Optional[int], Optional[int], Optional[int]]:
     val = str(val).strip()
@@ -338,16 +360,22 @@ def parse_box45_single(raw: str) -> pd.DataFrame:
     i, n = 0, len(lines)
     recs: List[Dict[str, object]] = []
     while i < n:
-        while i < n and not _looks_like_name(lines[i]): i += 1
+        # seek next real horse name (robust)
+        while i < n and not _looks_like_name(lines, i):
+            i += 1
         if i >= n: break
         name = lines[i].strip(); i += 1
+
+        # read up to 10 metric lines until next real name
         values: List[str] = []
         while i < n and len(values) < 10:
-            if _looks_like_name(lines[i]): break
+            if _looks_like_name(lines, i):  # next horse found
+                break
             values.append(lines[i].strip()); i += 1
         values += [None] * (10 - len(values)) if len(values) < 10 else []
         data = {"Horse": name}
-        for key, val in zip(BOX_ORDER, values): data[key] = val
+        for key, val in zip(BOX_ORDER, values):
+            data[key] = val
         recs.append(data)
 
     df = pd.DataFrame(recs)
@@ -601,7 +629,6 @@ with TAB_PACE:
             df["Horse"] = df["Horse"].astype(str).str.strip()
 
             # ------- Robust AdjSpeed & RS_Avg mapping -------
-            # AdjSpeed aliases
             adjspeed_aliases = [
                 "AdjSpeed","KeySpeedAvg","Key Speed Factors Average",
                 "Key_Speed_Factors_Average","Adjusted Speed","Adjusted_Speed","KeySpeed"
@@ -613,7 +640,6 @@ with TAB_PACE:
             if col_adjspeed != "AdjSpeed":
                 df["AdjSpeed"] = pd.to_numeric(df[col_adjspeed], errors="coerce")
 
-            # RS_Avg aliases (avg of last 5 run styles)
             rsavg_aliases = ["RS_Avg","RS Avg","RSAVG","RS_Avg5","RS_Avg (5)","RS5_Avg","RS(5)Avg"]
             col_rsavg = map_column(df, rsavg_aliases)
             if col_rsavg is None:
@@ -622,7 +648,6 @@ with TAB_PACE:
             if col_rsavg != "RS_Avg":
                 df["RS_Avg"] = pd.to_numeric(df[col_rsavg], errors="coerce")
 
-            # Optional display: RS_Avg10 if present
             rs10_aliases = ["RS_Avg10","RS Avg 10","RSAVG10","RS(10)Avg","RS10_Avg"]
             col_rs10 = map_column(df, rs10_aliases)
             if col_rs10 and col_rs10 != "RS_Avg10":
@@ -704,7 +729,7 @@ with TAB_PACE:
             else:
                 df["Class_Bonus"] = 0.0
 
-            # Conditions bonus: average of available place rates
+            # Conditions bonus
             cond_cols = [c for c in ["dist_place","cls_place","runpm1_place","trackstyle_place","crs_place","lhrh_place","going_place"] if c in df.columns]
             if cond_cols:
                 df["_cond_mean"] = df[cond_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
@@ -716,7 +741,7 @@ with TAB_PACE:
             if clip5:
                 df["Suitability"] = df["Suitability"].clip(1.0, 5.0)
 
-            # -------- Show ALL runners (no head())
+            # Show ALL runners
             show_cols = ["Horse","RS_Avg","RS_Avg10","Style","AdjSpeed","ΔvsPar","LCP",
                          "PaceFit","SpeedFit","wp","ws","Suitability_Base",
                          "OR_Bonus","Class_Bonus","Cond_Bonus","Suitability",
