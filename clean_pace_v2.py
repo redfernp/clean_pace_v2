@@ -1,4 +1,3 @@
-# clean_pace_v2_allinone.py
 from __future__ import annotations
 import re
 from dataclasses import dataclass
@@ -480,72 +479,111 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
     prom_q     = d[(d["style"]=="Prominent") & (d["lcp"]=="Questionable")]
 
     n_front, n_fh, n_ph, n_fq, n_pq = len(front_all), len(front_high), len(prom_high), len(front_q), len(prom_q)
+    n_high_early = n_fh + n_ph
 
     W_FH, W_PH, W_FQ, W_PQ = 2.0, 0.8, 0.5, 0.2
     energy = (W_FH*n_fh) + (W_PH*n_ph) + (W_FQ*n_fq) + (W_PQ*n_pq)
 
-    if n_fh >= 2:                 scenario, conf = "Strong", 0.65; debug["rules_applied"].append("≥2 High Front → Strong")
-    elif (n_fh+n_ph)>=3 and energy>=3.2: scenario, conf = "Strong", 0.65; debug["rules_applied"].append("≥3 High early & energy≥3.2 → Strong")
-    elif energy >= 3.2:           scenario, conf = "Strong", 0.60; debug["rules_applied"].append("energy≥3.2 → Strong")
-    elif (n_fh+n_ph) >= 2:        scenario, conf = "Even", 0.60;  debug["rules_applied"].append("≥2 High early → Even")
-    elif (n_fh+n_ph) == 1 and (n_fq+n_pq) >= 1:
-                                   scenario, conf = "Even", 0.55;  debug["rules_applied"].append("1 High + Questionables → Even")
-    elif (n_fh+n_ph) == 1:        scenario, conf = "Even", 0.60;  debug["rules_applied"].append("1 High → Even")
-    elif (n_fq+n_pq) >= 1:        scenario, conf = "Slow", 0.60;  debug["rules_applied"].append("Only Questionables → Slow")
-    else:                         scenario, conf = "Slow", 0.70;  debug["rules_applied"].append("No credible early → Slow")
-
-    if n_front == 0 or n_fh == 0:
-        allow_strong = False
-        if n_ph >= 3:
-            try: allow_strong = float(prom_high["dvp"].mean()) >= -1.0
-            except Exception: allow_strong = False
-        if not allow_strong and scenario in ("Strong","Very Strong"):
-            scenario, conf = "Even", min(conf,0.60); debug["rules_applied"].append("No-front cap → Even")
-
-    if n_fh == 1 and n_ph <= 1:
-        try: lf = float(front_high["dvp"].iloc[0])
-        except Exception: lf = None
-        if (lf is not None) and (lf >= 2.0) and scenario in ("Strong","Very Strong"):
-            scenario, conf = "Even", max(conf,0.65); debug["rules_applied"].append("Dominant-front cap → Even")
-
-    if n_fh == 1:
-        try: lf2 = float(front_high["dvp"].iloc[0])
-        except Exception: lf2 = None
-        if (lf2 is None) or (lf2 <= 1.0):
-            if scenario in ("Strong","Very Strong"):
-                scenario, conf = "Even", max(conf,0.60); debug["rules_applied"].append("Single-front cap (≤+1) → Even")
-        if (lf2 is not None) and (lf2 <= -2.0) and (n_ph <= 1) and scenario == "Even":
-            scenario, conf = "Slow", max(conf,0.65); debug["rules_applied"].append("Single-front below par → Slow")
-
-    if n_front == 1:
-        try: anyf = float(front_all["dvp"].iloc[0])
-        except Exception: anyf = None
-        if (anyf is not None) and (anyf <= -8.0):
-            idx = max(0, ["Slow","Even","Strong","Very Strong"].index(scenario)-1)
-            scenario = ["Slow","Even","Strong","Very Strong"][idx]
-            conf = max(conf,0.65); debug["rules_applied"].append("Weak solo leader → downgrade")
-
     band = _dist_band(s.distance_f)
-    if n_fh == 2 and scenario in ("Strong","Very Strong"):
-        debug["rules_applied"].append("Two High Fronts (kept)")
+    locked_strong = False
 
-    if band in ("5f","6f") and n_fh == 1 and n_ph <= 2:
-        try: lf = float(front_high["dvp"].iloc[0])
-        except Exception: lf = None
-        dvp_ok = -0.5 if band=="5f" else -1.0
-        energy_cap = 4.0 if band=="5f" else 3.6
-        if (lf is not None) and (lf >= dvp_ok) and (energy < energy_cap) and scenario in ("Strong","Very Strong"):
-            scenario, conf = "Even", max(conf,0.65); debug["rules_applied"].append("Sprint cap: Strong→Even")
+    # --- 3-LCP guarantee rule ---
+    if n_high_early >= 3:
+        scenario, conf = "Strong", 0.80
+        locked_strong = True
+        debug["rules_applied"].append("≥3 High-LCP early (Front/Prominent) → Strong (locked)")
+    else:
+        # Original decision tree
+        if n_fh >= 2:
+            scenario, conf = "Strong", 0.65
+            debug["rules_applied"].append("≥2 High Front → Strong")
+        elif (n_fh+n_ph)>=3 and energy>=3.2:
+            scenario, conf = "Strong", 0.65
+            debug["rules_applied"].append("≥3 High early & energy≥3.2 → Strong")
+        elif energy >= 3.2:
+            scenario, conf = "Strong", 0.60
+            debug["rules_applied"].append("energy≥3.2 → Strong")
+        elif (n_fh+n_ph) >= 2:
+            scenario, conf = "Even", 0.60
+            debug["rules_applied"].append("≥2 High early → Even")
+        elif (n_fh+n_ph) == 1 and (n_fq+n_pq) >= 1:
+            scenario, conf = "Even", 0.55
+            debug["rules_applied"].append("1 High + Questionables → Even")
+        elif (n_fh+n_ph) == 1:
+            scenario, conf = "Even", 0.60
+            debug["rules_applied"].append("1 High → Even")
+        elif (n_fq+n_pq) >= 1:
+            scenario, conf = "Slow", 0.60
+            debug["rules_applied"].append("Only Questionables → Slow")
+        else:
+            scenario, conf = "Slow", 0.70
+            debug["rules_applied"].append("No credible early → Slow")
 
-    if band == "route" and scenario == "Even" and n_fh == 1 and n_ph <= 1:
-        try: lf = float(front_high["dvp"].iloc[0])
-        except Exception: lf = None
-        if (lf is not None) and (lf >= -1.0):
-            scenario = "Even (Front-Controlled)"
-            debug["rules_applied"].append("Front-controlled tag")
+        # Caps and adjustments only if not locked
+        if n_front == 0 or n_fh == 0:
+            allow_strong = False
+            if n_ph >= 3:
+                try: allow_strong = float(prom_high["dvp"].mean()) >= -1.0
+                except Exception: allow_strong = False
+            if not allow_strong and scenario in ("Strong","Very Strong"):
+                scenario, conf = "Even", min(conf,0.60)
+                debug["rules_applied"].append("No-front cap → Even")
 
-    debug.update({"counts":{"Front_all":int(n_front),"Front_High":int(n_fh),"Prominent_High":int(n_ph)},
-                  "early_energy": float(energy), "distance_band": band})
+        if n_fh == 1 and n_ph <= 1:
+            try: lf = float(front_high["dvp"].iloc[0])
+            except Exception: lf = None
+            if (lf is not None) and (lf >= 2.0) and scenario in ("Strong","Very Strong"):
+                scenario, conf = "Even", max(conf,0.65)
+                debug["rules_applied"].append("Dominant-front cap → Even")
+
+        if n_fh == 1:
+            try: lf2 = float(front_high["dvp"].iloc[0])
+            except Exception: lf2 = None
+            if (lf2 is None) or (lf2 <= 1.0):
+                if scenario in ("Strong","Very Strong"):
+                    scenario, conf = "Even", max(conf,0.60)
+                    debug["rules_applied"].append("Single-front cap (≤+1) → Even")
+            if (lf2 is not None) and (lf2 <= -2.0) and (n_ph <= 1) and scenario == "Even":
+                scenario, conf = "Slow", max(conf,0.65)
+                debug["rules_applied"].append("Single-front below par → Slow")
+
+        if n_front == 1:
+            try: anyf = float(front_all["dvp"].iloc[0])
+            except Exception: anyf = None
+            if (anyf is not None) and (anyf <= -8.0):
+                idx = max(0, ["Slow","Even","Strong","Very Strong"].index(scenario)-1)
+                scenario = ["Slow","Even","Strong","Very Strong"][idx]
+                conf = max(conf,0.65)
+                debug["rules_applied"].append("Weak solo leader → downgrade")
+
+        if n_fh == 2 and scenario in ("Strong","Very Strong"):
+            debug["rules_applied"].append("Two High Fronts (kept)")
+
+        if band in ("5f","6f") and n_fh == 1 and n_ph <= 2:
+            try: lf = float(front_high["dvp"].iloc[0])
+            except Exception: lf = None
+            dvp_ok = -0.5 if band=="5f" else -1.0
+            energy_cap = 4.0 if band=="5f" else 3.6
+            if (lf is not None) and (lf >= dvp_ok) and (energy < energy_cap) and scenario in ("Strong","Very Strong"):
+                scenario, conf = "Even", max(conf,0.65)
+                debug["rules_applied"].append("Sprint cap: Strong→Even")
+
+        if band == "route" and scenario == "Even" and n_fh == 1 and n_ph <= 1:
+            try: lf = float(front_high["dvp"].iloc[0])
+            except Exception: lf = None
+            if (lf is not None) and (lf >= -1.0):
+                scenario = "Even (Front-Controlled)"
+                debug["rules_applied"].append("Front-controlled tag")
+
+    debug.update({
+        "counts":{
+            "Front_all":int(n_front),
+            "Front_High":int(n_fh),
+            "Prominent_High":int(n_ph)
+        },
+        "early_energy": float(energy),
+        "distance_band": band
+    })
     lcp_map = dict(zip(d["horse"], d["lcp"]))
     return scenario, conf, lcp_map, debug
 
@@ -621,6 +659,14 @@ with TAB_PACE:
     w_cls  = c2[1].slider("Class compat (ccs_5) weight", 0.0, 0.4, 0.10, 0.05)
     w_cond = c2[2].slider("Conditions (place rates) weight", 0.0, 0.4, 0.10, 0.05)
 
+    # --- New: Manual pace override switch ---
+    pace_override = st.selectbox(
+        "Pace override (optional)",
+        options=["Auto", "Slow", "Even", "Strong", "Very Strong"],
+        index=0,
+        help="Leave as 'Auto' to use the modelled pace, or select a scenario to override it."
+    )
+
     if upl is not None:
         try:
             df = pd.read_csv(upl)
@@ -671,7 +717,16 @@ with TAB_PACE:
                 dvp=float(r["ΔvsPar"]) if pd.notna(r["ΔvsPar"]) else None,
                 lcp=r.LCP
             ) for _, r in df.iterrows()]
-            scenario, conf, lcp_map, debug = project_pace_from_rows(rows, s)
+            scenario, conf_numeric, lcp_map, debug = project_pace_from_rows(rows, s)
+
+            # Apply manual override if selected
+            if pace_override != "Auto":
+                debug["rules_applied"].append(f"Manual override applied: {pace_override}")
+                debug["manual_override"] = pace_override
+                scenario = pace_override
+                conf_display = "Manual"
+            else:
+                conf_display = f"{conf_numeric:.2f}"
 
             # PaceFit maps
             band = "5f" if distance_f <= 5.5 else ("6f" if distance_f <= 6.5 else "route")
@@ -685,8 +740,8 @@ with TAB_PACE:
                 key = "Even" if scenario.startswith("Even") else scenario
                 pacefit_map = PACEFIT.get(key, PACEFIT["Even"])
 
-            # Pace/Speed weights
-            wp = s.wp_confident if (scenario in ("Slow","Very Strong") and conf >= 0.65) else s.wp_even
+            # Pace/Speed weights (use numeric confidence internally)
+            wp = s.wp_confident if (scenario in ("Slow","Very Strong") and conf_numeric >= 0.65) else s.wp_even
             if band == "5f": wp = max(wp, 0.60)
             elif band == "6f": wp = max(wp, 0.55)
             ws = 1 - wp
@@ -705,7 +760,7 @@ with TAB_PACE:
 
             df["Suitability_Base"] = df["PaceFit"] * wp + df["SpeedFit"] * ws
             df["wp"], df["ws"] = wp, ws
-            df["Scenario"], df["Confidence"] = scenario, conf
+            df["Scenario"], df["Confidence"] = scenario, conf_display
 
             # OR context bonus
             if "rating_context_index" in df.columns:
@@ -751,7 +806,10 @@ with TAB_PACE:
                                       "crs_place","lhrh_place","going_place"] if c in df.columns]
             out = df[show_cols + extra_cols].sort_values(["Suitability","Suitability_Base","SpeedFit"], ascending=False)
 
-            st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f}) — Band: {'5f' if distance_f<=5.5 else ('6f' if distance_f<=6.5 else 'route')}")
+            st.subheader(
+                f"Projected Pace: {scenario} (confidence {conf_display}) — "
+                f"Band: {'5f' if distance_f<=5.5 else ('6f' if distance_f<=6.5 else 'route')}"
+            )
             with st.expander("Why this pace? (Reason used)", expanded=True):
                 counts = debug.get("counts", {})
                 st.markdown(
