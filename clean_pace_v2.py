@@ -466,6 +466,48 @@ def _speed_score(dvp: Optional[float]) -> float:
     if dvp >= -8:   return 2.0
     return 1.0
 
+# ========= HYBRID PACE HELPER =========
+def should_use_hybrid(distance_f: float,
+                      scenario: str,
+                      confidence: float,
+                      counts: dict) -> bool:
+    """
+    Determine whether to use a Hybrid Even/Strong suitability blend.
+    Hybrid pace only useful at <= 8f and when scenario/confidence is borderline.
+    """
+    FH = counts.get("Front_High", 0)
+    PH = counts.get("Prominent_High", 0)
+    total_high = FH + PH
+
+    # A) Distance gate
+    if distance_f > 8.0:
+        return False
+
+    # B) Scenario gate (borderline Even/Strong only)
+    if scenario.startswith("Slow") or scenario.startswith("Very Strong"):
+        return False
+    if not (scenario.startswith("Even") or scenario == "Strong"):
+        return False
+
+    # C) Confidence gate (borderline zone)
+    if confidence < 0.45 or confidence > 0.65:
+        return False
+
+    # D) Leader structure gate
+    if total_high <= 1:
+        return False
+    if FH >= 3:
+        return False
+
+    # Best Hybrid zone: 1–2 High front, plus at least 2 early-high combined
+    if FH in (1, 2) and total_high >= 2:
+        return True
+
+    return False
+
+# =========================
+# Pace projection engine
+# =========================
 def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float,Dict[str,str],Dict[str,object]]:
     debug = {"rules_applied": []}
     if not rows: return "N/A", 0.0, {}, {"error": "no rows"}
@@ -659,7 +701,7 @@ with TAB_PACE:
     w_cls  = c2[1].slider("Class compat (ccs_5) weight", 0.0, 0.4, 0.10, 0.05)
     w_cond = c2[2].slider("Conditions (place rates) weight", 0.0, 0.4, 0.10, 0.05)
 
-    # --- New: Manual pace override switch ---
+    # --- Manual pace override switch ---
     pace_override = st.selectbox(
         "Pace override (optional)",
         options=["Auto", "Slow", "Even", "Strong", "Very Strong"],
@@ -730,6 +772,23 @@ with TAB_PACE:
 
             # PaceFit maps
             band = "5f" if distance_f <= 5.5 else ("6f" if distance_f <= 6.5 else "route")
+
+            # Even & Strong maps (for Hybrid & display)
+            if band == "5f":
+                even_map = PACEFIT_5F["Even"]
+                strong_map = PACEFIT_5F["Strong"]
+            elif band == "6f":
+                even_map = PACEFIT_6F["Even"]
+                strong_map = PACEFIT_6F["Strong"]
+            else:
+                # Route distances – use standard Even & Strong, with special Even (FC) if tagged
+                if scenario.startswith("Even (Front-Controlled)"):
+                    even_map = PACEFIT_EVEN_FC
+                else:
+                    even_map = PACEFIT["Even"]
+                strong_map = PACEFIT["Strong"]
+
+            # Final scenario-specific map (for non-hybrid use)
             if scenario.startswith("Even (Front-Controlled)") and band == "route":
                 pacefit_map = PACEFIT_EVEN_FC
             elif band == "5f":
@@ -747,7 +806,10 @@ with TAB_PACE:
             ws = 1 - wp
 
             # Base PaceFit & SpeedFit
-            df["PaceFit"]  = df["Style"].map(pacefit_map).fillna(3.0)
+            df["PaceFit_Even"]  = df["Style"].map(even_map).fillna(3.0)
+            df["PaceFit_Strong"] = df["Style"].map(strong_map).fillna(3.0)
+            df["PaceFit"]       = df["Style"].map(pacefit_map).fillna(3.0)
+
             def _speedfit(v):
                 if pd.isna(v): return 2.3
                 v = float(v)
@@ -758,9 +820,41 @@ with TAB_PACE:
                 return 1.0
             df["SpeedFit"] = df["ΔvsPar"].apply(_speedfit)
 
+            # Even & Strong suitability bases
+            df["Suitability_Base_Even"]   = df["PaceFit_Even"]   * wp + df["SpeedFit"] * ws
+            df["Suitability_Base_Strong"] = df["PaceFit_Strong"] * wp + df["SpeedFit"] * ws
+
+            # Start with scenario-based base (non-hybrid)
             df["Suitability_Base"] = df["PaceFit"] * wp + df["SpeedFit"] * ws
+            df["Suitability_Base_Hybrid"] = df["Suitability_Base_Even"]  # default
+
+            # HYBRID PACE — automatic when conditions met, and ONLY if no manual override
+            use_hyb = False
+            if pace_override == "Auto":
+                use_hyb = should_use_hybrid(
+                    distance_f=distance_f,
+                    scenario=scenario,
+                    confidence=conf_numeric,
+                    counts=debug.get("counts", {})
+                )
+
+            if use_hyb:
+                debug["rules_applied"].append("Hybrid pace activated (Even + Strong, 60/40 weighted)")
+                if scenario.startswith("Even"):
+                    hybrid = 0.6 * df["Suitability_Base_Even"] + 0.4 * df["Suitability_Base_Strong"]
+                elif scenario == "Strong":
+                    hybrid = 0.6 * df["Suitability_Base_Strong"] + 0.4 * df["Suitability_Base_Even"]
+                else:
+                    hybrid = 0.5 * df["Suitability_Base_Even"] + 0.5 * df["Suitability_Base_Strong"]
+
+                df["Suitability_Base_Hybrid"] = hybrid
+                df["Suitability_Base"] = df["Suitability_Base_Hybrid"]
+                df["Scenario"] = "Hybrid (Even–Strong)"
+            else:
+                df["Scenario"] = scenario  # keep original or override
+
             df["wp"], df["ws"] = wp, ws
-            df["Scenario"], df["Confidence"] = scenario, conf_display
+            df["Confidence"] = conf_display
 
             # OR context bonus
             if "rating_context_index" in df.columns:
@@ -792,22 +886,29 @@ with TAB_PACE:
             else:
                 df["Cond_Bonus"] = 0.0
 
+            # Final Suitability (using Hybrid-adjusted Suitability_Base)
             df["Suitability"] = df["Suitability_Base"] + df["OR_Bonus"] + df["Class_Bonus"] + df["Cond_Bonus"]
             if clip5:
                 df["Suitability"] = df["Suitability"].clip(1.0, 5.0)
 
             # Show ALL runners
-            show_cols = ["Horse","RS_Avg","RS_Avg10","Style","AdjSpeed","ΔvsPar","LCP",
-                         "PaceFit","SpeedFit","wp","ws","Suitability_Base",
-                         "OR_Bonus","Class_Bonus","Cond_Bonus","Suitability",
-                         "Scenario","Confidence"]
+            show_cols = [
+                "Horse","RS_Avg","RS_Avg10","Style","AdjSpeed","ΔvsPar","LCP",
+                "PaceFit_Even","PaceFit_Strong","PaceFit",
+                "SpeedFit","wp","ws",
+                "Suitability_Base_Even","Suitability_Base_Strong","Suitability_Base_Hybrid","Suitability_Base",
+                "OR_Bonus","Class_Bonus","Cond_Bonus","Suitability",
+                "Scenario","Confidence"
+            ]
             extra_cols = [c for c in ["today_or","max_or_10","handicap_runs","ccs_5",
                                       "dist_place","cls_place","runpm1_place","trackstyle_place",
                                       "crs_place","lhrh_place","going_place"] if c in df.columns]
-            out = df[show_cols + extra_cols].sort_values(["Suitability","Suitability_Base","SpeedFit"], ascending=False)
+            out = df[show_cols + extra_cols].sort_values(
+                ["Suitability","Suitability_Base","SpeedFit"], ascending=False
+            )
 
             st.subheader(
-                f"Projected Pace: {scenario} (confidence {conf_display}) — "
+                f"Projected Pace: {df['Scenario'].iloc[0]} (confidence {conf_display}) — "
                 f"Band: {'5f' if distance_f<=5.5 else ('6f' if distance_f<=6.5 else 'route')}"
             )
             with st.expander("Why this pace? (Reason used)", expanded=True):
