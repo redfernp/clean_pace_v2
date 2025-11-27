@@ -529,11 +529,13 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
     band = _dist_band(s.distance_f)
     locked_strong = False
 
-    # --- 3-LCP guarantee rule ---
-    if n_high_early >= 3:
+    # --- 3-LCP guarantee rule (FRONT ONLY) ---
+    # Lock Strong ONLY when there are 3 or more High-LCP FRONT runners.
+    # Prominent High runners do NOT trigger this lock on their own.
+    if n_fh >= 3:
         scenario, conf = "Strong", 0.80
         locked_strong = True
-        debug["rules_applied"].append("≥3 High-LCP early (Front/Prominent) → Strong (locked)")
+        debug["rules_applied"].append("≥3 High-LCP Fronts → Strong (locked)")
     else:
         # Original decision tree
         if n_fh >= 2:
@@ -935,3 +937,4 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
+
