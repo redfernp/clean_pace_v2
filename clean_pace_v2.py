@@ -278,6 +278,46 @@ def should_use_hybrid(distance_f: float,
         return True
     return False
 
+# ========= LATE-STRONG (6f) WARNING TAG =========
+def is_late_strong_6f(distance_f: float,
+                      scenario: str,
+                      confidence: float,
+                      counts: dict,
+                      energy: float) -> bool:
+    """
+    Display-only warning: Even early → Strong late risk elevated.
+    DOES NOT change scenario/hybrid/suitability; just drives one extra line of text.
+    """
+    # 6f band only
+    if not (5.5 < float(distance_f) <= 6.5):
+        return False
+
+    # Only meaningful when scenario is Even/Strong-ish (not extreme)
+    if scenario.startswith("Slow") or scenario.startswith("Very Strong"):
+        return False
+    if not (scenario.startswith("Even") or scenario == "Strong"):
+        return False
+
+    FH = int(counts.get("Front_High", 0))
+    PH = int(counts.get("Prominent_High", 0))
+    total_high = FH + PH
+
+    # Needs credible early presence
+    if total_high < 2:
+        return False
+
+    # Not a sustained early burn-up (that would be Strong throughout)
+    if FH > 1:
+        return False
+
+    # Borderline energy window + mid confidence = classic late ramp profile
+    e = float(energy)
+    c = float(confidence) if confidence is not None else 0.0
+    if 2.6 <= e <= 3.4 and 0.45 <= c <= 0.70:
+        return True
+
+    return False
+
 # =========================
 # Pace projection engine (advanced)
 # =========================
@@ -556,6 +596,18 @@ with TAB_PACE:
             else:
                 conf_display = f"{conf_numeric:.2f}"
 
+            # ---- Late-Strong (6f) warning flag (no UI change yet; just compute) ----
+            counts_for_warn = debug.get("counts", {})
+            energy_for_warn = debug.get("early_energy", 0.0)
+            late_strong_warn = is_late_strong_6f(
+                distance_f=distance_f,
+                scenario=scenario,
+                confidence=conf_numeric,
+                counts=counts_for_warn,
+                energy=energy_for_warn
+            )
+            debug["late_strong_warn"] = late_strong_warn
+
             # PaceFit maps by band
             band = "5f" if distance_f <= 5.5 else ("6f" if distance_f <= 6.5 else "route")
 
@@ -713,6 +765,13 @@ with TAB_PACE:
                 if rules:
                     st.markdown("**Rules applied:**")
                     for r in rules: st.write(f"• {r}")
+
+                # ---- UI CHANGE REQUESTED: add ONE extra line at the bottom (only when flagged) ----
+                if debug.get("late_strong_warn", False):
+                    st.markdown(
+                        "\n⚠️ **Beware Late-Strong (6f):** pace may lift sharply late (~2f → line). "
+                        "Prominent / first-wave attackers can be advantaged."
+                    )
 
             st.markdown("## Backbone — Pace/Speed Suitability (unchanged)")
             show_cols = [
