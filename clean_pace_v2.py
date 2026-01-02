@@ -39,7 +39,7 @@ def _rs_category_from_value(avg: Optional[float], front_thr=1.6, prom_thr=2.4, m
 def _strip_parenthetical(s: str) -> str:
     """
     Remove any parenthetical block like '(78)' from speed-series strings.
-    This is IMPORTANT because that bracketed number is the average, not a run.
+    That bracketed number is the average, not a run.
     """
     return re.sub(r"\([^)]*\)", "", str(s))
 
@@ -142,7 +142,7 @@ def _parse_wpt_value(val: str) -> Tuple[Optional[float], Optional[int], Optional
     return place, w, p, t
 
 def _parse_speed_series(s: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-    # IMPORTANT FIX: ignore the bracketed average e.g. '(78)'
+    # IMPORTANT: ignore bracketed average '(xx)'
     nums = _numbers_speed_series(s)
     if not nums: return None, None, None, None
     last = nums[-1]; highest = max(nums)
@@ -184,12 +184,11 @@ def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
     if df_raw.empty: return df_raw.copy()
     out = df_raw.copy()
 
-    # keep raw series for transparency
     out["SpeedRunsRaw"] = out["speed_series"].fillna("").astype(str)
 
     last_list, high_list, avg3_list, all_list, keyavg_list, runs_list_str = [], [], [], [], [], []
     for s in out["SpeedRunsRaw"].fillna(""):
-        nums = _numbers_speed_series(s)  # IMPORTANT FIX here too
+        nums = _numbers_speed_series(s)  # ignore bracketed average
         runs_list_str.append(", ".join([str(int(x)) if float(x).is_integer() else str(x) for x in nums]) if nums else "")
 
         last, high, avg3, avgall = _parse_speed_series(s)
@@ -441,7 +440,7 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
     return scenario, conf, lcp_map, debug
 
 # =========================
-# Diagnostics (NEW, separate; no effect on Suitability)
+# Diagnostics (separate; no effect on Suitability)
 # =========================
 COND_COLS = ["dist_place","cls_place","runpm1_place","trackstyle_place","crs_place","lhrh_place","going_place"]
 
@@ -691,7 +690,7 @@ with TAB_PACE:
                     counts=debug.get("counts", {})
                 )
 
-            # Build Late-Strong warning STRICTLY when Hybrid is active
+            # Late-Strong warning STRICTLY when Hybrid is active
             late_strong_warn = late_strong_warn_hybrid_only_6f(
                 distance_f=distance_f,
                 use_hybrid=use_hyb,
@@ -701,18 +700,33 @@ with TAB_PACE:
             )
             debug["late_strong_warn"] = bool(late_strong_warn)
 
-            # If warning is on, choose "watch" horses (unchanged logic here)
+            # ---- FIXED WATCH LOGIC (this is the bit you said I broke) ----
+            # We now pick horses that are MUCH better in Slow than in the Hybrid blend,
+            # because that matches “not strong until late” (slow/controlled early, then lift late).
             debug["late_strong_watch"] = []
             if debug["late_strong_warn"]:
+                # compute the actual hybrid blend (same weights as later)
+                if scenario.startswith("Even"):
+                    hybrid_now = 0.6 * df["Suitability_Even"] + 0.4 * df["Suitability_Strong"]
+                elif scenario == "Strong":
+                    hybrid_now = 0.6 * df["Suitability_Strong"] + 0.4 * df["Suitability_Even"]
+                else:
+                    hybrid_now = 0.5 * df["Suitability_Even"] + 0.5 * df["Suitability_Strong"]
+
                 tmp = df.copy()
-                tmp["LateKick"] = (tmp["Suitability_Strong"] - tmp["Suitability_Even"])
+                tmp["HybridNow"] = hybrid_now
+                tmp["LateStrongEdge"] = tmp["Suitability_Slow"] - tmp["HybridNow"]  # POSITIVE => slow-better-than-hybrid
+
+                # late-strong winners are often Prominent/Mid (not necessarily Hold-up), never pure Front
                 tmp = tmp[tmp["Style"].isin(["Prominent", "Mid", "Hold-up"])].copy()
-                tmp = tmp.sort_values(["LateKick", "Suitability_Strong"], ascending=False)
-                watch = tmp[tmp["LateKick"] > 0].head(2)["Horse"].tolist()
+                tmp = tmp.sort_values(["LateStrongEdge", "Suitability_Slow"], ascending=False)
+
+                watch = tmp[tmp["LateStrongEdge"] > 0].head(2)["Horse"].tolist()
                 if not watch:
                     watch = tmp.head(1)["Horse"].tolist()
                 debug["late_strong_watch"] = watch
 
+            # Apply Hybrid blend (unchanged)
             if use_hyb:
                 debug["rules_applied"].append("Hybrid pace activated (Even + Strong, 60/40 weighted)")
                 if scenario.startswith("Even"):
@@ -750,7 +764,7 @@ with TAB_PACE:
                 df["Conditions_Mean"] = np.nan
                 df["Conditions_Score"] = None
 
-            # Speed consistency (runs >= Par)
+            # Speed consistency (runs >= Par) — FIXED: ignore bracketed average
             sr_col = None
             for cand in ["SpeedRunsRaw","speed_series","SpeedRunsList"]:
                 if cand in df.columns:
@@ -760,8 +774,7 @@ with TAB_PACE:
             totals, atpar, pct = [], [], []
             if sr_col is not None:
                 for srs in df[sr_col].fillna("").astype(str):
-                    # IMPORTANT FIX: ignore bracketed average in consistency calc
-                    nums = _numbers_speed_series(srs)
+                    nums = _numbers_speed_series(srs)  # IGNORE '(avg)'
                     n_total = len(nums)
                     n_par = sum(1 for x in nums if float(x) >= float(class_par))
                     totals.append(n_total)
@@ -802,7 +815,7 @@ with TAB_PACE:
                     st.markdown("**Rules applied:**")
                     for r in rules: st.write(f"• {r}")
 
-                # ---- UI CHANGE REQUESTED: add ONE extra line at the bottom (ONLY when Hybrid is active AND warning triggers) ----
+                # ---- UI CHANGE REQUESTED: add ONE extra line at the bottom ----
                 if debug.get("late_strong_warn", False):
                     watch = debug.get("late_strong_watch", [])
                     watch_txt = (f" **Watch:** {', '.join(watch)}" if watch else "")
