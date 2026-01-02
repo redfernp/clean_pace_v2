@@ -285,38 +285,46 @@ def is_late_strong_6f(distance_f: float,
                       counts: dict,
                       energy: float) -> bool:
     """
-    Display-only warning: Even early → Strong late risk elevated.
-    DOES NOT change scenario/hybrid/suitability; just drives one extra line of text.
+    Display-only warning for 6f: race can *finish* Strong even if labelled Even/Hybrid.
+    DOES NOT change scenario/hybrid/suitability; only drives one extra line of text.
     """
     # 6f band only
     if not (5.5 < float(distance_f) <= 6.5):
         return False
 
-    # Only meaningful when scenario is Even/Strong-ish (not extreme)
+    FH = int(counts.get("Front_High", 0))
+    PH = int(counts.get("Prominent_High", 0))
+    total_high = FH + PH
+    e = float(energy)
+    c = float(confidence) if confidence is not None else 0.0
+
+    # We only care about "Even–Strong type" races (Even / Strong / Hybrid)
+    # NOTE: your UI scenario becomes "Hybrid (Even–Strong)" later, but at this point
+    # scenario is still the raw scenario from the pace engine.
     if scenario.startswith("Slow") or scenario.startswith("Very Strong"):
         return False
     if not (scenario.startswith("Even") or scenario == "Strong"):
         return False
 
-    FH = int(counts.get("Front_High", 0))
-    PH = int(counts.get("Prominent_High", 0))
-    total_high = FH + PH
-
-    # Needs credible early presence
+    # Needs credible early pressure (otherwise it's just Slow/Even)
     if total_high < 2:
         return False
 
-    # Not a sustained early burn-up (that would be Strong throughout)
-    if FH > 1:
+    # If there are 3+ High fronts it's a true burn-up (Strong throughout), not "late-strong"
+    if FH >= 3:
         return False
 
-    # Borderline energy window + mid confidence = classic late ramp profile
-    e = float(energy)
-    c = float(confidence) if confidence is not None else 0.0
-    if 2.6 <= e <= 3.4 and 0.45 <= c <= 0.70:
+    # Key pattern you’re trying to capture:
+    # - 6f
+    # - multiple credible early (>=2)
+    # - energy can be high (like 4.8)
+    # - but not an extreme front-war (cap FH at 2)
+    # - confidence moderate-to-high
+    if FH in (1, 2) and total_high >= 2 and 0.55 <= c <= 0.80 and e >= 3.2:
         return True
 
     return False
+
 
 # =========================
 # Pace projection engine (advanced)
@@ -823,3 +831,4 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
+
