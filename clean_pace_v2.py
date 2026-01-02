@@ -278,18 +278,18 @@ def should_use_hybrid(distance_f: float,
         return True
     return False
 
-# ========= LATE-STRONG (6f) WARNING TAG =========
-def is_late_strong_6f(distance_f: float,
-                      scenario: str,
-                      confidence: float,
-                      counts: dict,
-                      energy: float) -> bool:
+# ========= LATE-STRONG (6f) WARNING TAG (DISPLAY ONLY) =========
+def late_strong_warn_hybrid_only_6f(distance_f: float,
+                                   use_hybrid: bool,
+                                   confidence: float,
+                                   counts: dict,
+                                   energy: float) -> bool:
     """
-    Display-only warning for 6f: race can *finish* Strong even if labelled Even/Hybrid.
-    DOES NOT change scenario/hybrid/suitability; only drives one extra line of text.
-    NOTE: In the app logic this is now gated to only run when Hybrid is active.
+    STRICT: only when Hybrid is actually active.
+    Display-only warning for 6f: race can *finish* Strong even when model blends Even/Strong.
     """
-    # 6f band only
+    if not use_hybrid:
+        return False
     if not (5.5 < float(distance_f) <= 6.5):
         return False
 
@@ -299,22 +299,16 @@ def is_late_strong_6f(distance_f: float,
     e = float(energy)
     c = float(confidence) if confidence is not None else 0.0
 
-    # Even/Strong type only (raw scenario from pace engine)
-    if scenario.startswith("Slow") or scenario.startswith("Very Strong"):
-        return False
-    if not (scenario.startswith("Even") or scenario == "Strong"):
-        return False
-
-    # Needs credible early pressure
+    # needs at least 2 credible early to create the "late lift" dynamic
     if total_high < 2:
         return False
 
-    # If 3+ High fronts, it's a true burn-up (Strong throughout), not "late-strong"
+    # avoid true burn-ups (that’s just Strong, not "late-strong")
     if FH >= 3:
         return False
 
-    # Typical 6f hybrid profile that can "lift late"
-    if FH in (1, 2) and total_high >= 2 and 0.55 <= c <= 0.80 and e >= 3.2:
+    # confidence + energy gates
+    if 0.55 <= c <= 0.85 and e >= 3.2:
         return True
 
     return False
@@ -672,6 +666,29 @@ with TAB_PACE:
                     counts=debug.get("counts", {})
                 )
 
+            # Build Late-Strong warning STRICTLY when Hybrid is active
+            late_strong_warn = late_strong_warn_hybrid_only_6f(
+                distance_f=distance_f,
+                use_hybrid=use_hyb,
+                confidence=conf_numeric,
+                counts=debug.get("counts", {}),
+                energy=debug.get("early_energy", 0.0),
+            )
+            debug["late_strong_warn"] = bool(late_strong_warn)
+
+            # If warning is on, choose "watch" horses: biggest improvers Even→Strong
+            debug["late_strong_watch"] = []
+            if debug["late_strong_warn"]:
+                tmp = df.copy()
+                tmp["LateKick"] = (tmp["Suitability_Strong"] - tmp["Suitability_Even"])
+                # prefer non-Front profiles for the late-lift idea
+                tmp = tmp[tmp["Style"].isin(["Prominent", "Mid", "Hold-up"])].copy()
+                tmp = tmp.sort_values(["LateKick", "Suitability_Strong"], ascending=False)
+                watch = tmp[tmp["LateKick"] > 0].head(2)["Horse"].tolist()
+                if not watch:
+                    watch = tmp.head(1)["Horse"].tolist()
+                debug["late_strong_watch"] = watch
+
             if use_hyb:
                 debug["rules_applied"].append("Hybrid pace activated (Even + Strong, 60/40 weighted)")
                 if scenario.startswith("Even"):
@@ -686,20 +703,6 @@ with TAB_PACE:
                 df["Scenario"] = "Hybrid (Even–Strong)"
             else:
                 df["Scenario"] = scenario
-
-            # ---- Late-Strong (6f) warning flag (STRICT: only when Hybrid is active) ----
-            if use_hyb:
-                counts_for_warn = debug.get("counts", {})
-                energy_for_warn = debug.get("early_energy", 0.0)
-                debug["late_strong_warn"] = is_late_strong_6f(
-                    distance_f=distance_f,
-                    scenario=scenario,      # raw scenario still Even/Strong type here
-                    confidence=conf_numeric,
-                    counts=counts_for_warn,
-                    energy=energy_for_warn
-                )
-            else:
-                debug["late_strong_warn"] = False
 
             df["wp"], df["ws"] = wp, ws
             df["Confidence"] = conf_display
@@ -769,11 +772,13 @@ with TAB_PACE:
                     st.markdown("**Rules applied:**")
                     for r in rules: st.write(f"• {r}")
 
-                # ---- UI CHANGE REQUESTED: add ONE extra line at the bottom (only when flagged) ----
+                # ---- UI CHANGE REQUESTED: add ONE extra line at the bottom (ONLY when Hybrid is active AND warning triggers) ----
                 if debug.get("late_strong_warn", False):
+                    watch = debug.get("late_strong_watch", [])
+                    watch_txt = (f" **Watch:** {', '.join(watch)}" if watch else "")
                     st.markdown(
-                        "\n⚠️ **Beware Late-Strong (6f):** pace may lift sharply late (~2f → line). "
-                        "Prominent / first-wave attackers can be advantaged."
+                        "\n⚠️ **Beware Late-Strong (6f):** Hybrid can understate late pressure — finishing speed can decide."
+                        + watch_txt
                     )
 
             st.markdown("## Backbone — Pace/Speed Suitability (unchanged)")
