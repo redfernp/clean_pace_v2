@@ -39,6 +39,15 @@ def _rs_category_from_value(avg: Optional[float], front_thr=1.6, prom_thr=2.4, m
 def _numbers(s: str) -> List[float]:
     return [float(x) for x in re.findall(r"-?\d+\.?\d*", str(s))]
 
+def _numbers_ignore_brackets(s: str) -> List[float]:
+    """
+    Speed series helper: ignore anything in parentheses, e.g.
+    '77, 85, 83 (82)' -> [77, 85, 83]
+    because (82) is the average, not an extra run.
+    """
+    s2 = re.sub(r"\([^)]*\)", "", str(s))
+    return [float(x) for x in re.findall(r"-?\d+\.?\d*", s2)]
+
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
@@ -445,14 +454,33 @@ def conditions_score_from_mean(x: Optional[float]) -> Optional[float]:
     if x >= 0.10: return 2.0
     return 1.0
 
-def consistency_score_from_ratio(r: Optional[float]) -> Optional[float]:
+def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_par: int) -> Optional[float]:
+    """
+    UPDATED (ONLY speed consistency):
+    - Score out of 10
+    - One-hit wonder rule: if total_runs == 1 and it beat par -> 8 (even if 100%)
+    """
     if r is None or (isinstance(r, float) and np.isnan(r)):
         return None
-    if r >= 0.60: return 5.0
-    if r >= 0.45: return 4.0
-    if r >= 0.30: return 3.0
-    if r >= 0.15: return 2.0
-    return 1.0
+
+    total_runs = int(total_runs or 0)
+    runs_at_par = int(runs_at_par or 0)
+
+    if total_runs <= 0:
+        return None
+
+    if total_runs == 1 and runs_at_par >= 1:
+        return 8.0
+
+    rr = float(r)
+    if rr >= 0.70: return 10.0
+    if rr >= 0.60: return 9.0
+    if rr >= 0.50: return 8.0
+    if rr >= 0.40: return 7.0
+    if rr >= 0.30: return 6.0
+    if rr >= 0.20: return 5.0
+    if rr >= 0.10: return 4.0
+    return 3.0
 
 # =========================
 # Tabs UI
@@ -745,7 +773,9 @@ with TAB_PACE:
                 df["Conditions_Mean"] = np.nan
                 df["Conditions_Score"] = None
 
-            # Speed consistency (runs >= Par)
+            # =========================
+            # Speed consistency (runs >= Par)  <-- ONLY SECTION CHANGED
+            # =========================
             sr_col = None
             for cand in ["SpeedRunsRaw","speed_series","SpeedRunsList"]:
                 if cand in df.columns:
@@ -755,7 +785,8 @@ with TAB_PACE:
             totals, atpar, pct = [], [], []
             if sr_col is not None:
                 for srs in df[sr_col].fillna("").astype(str):
-                    nums = _numbers(srs)
+                    # FIX: ignore bracketed average like "(78)"
+                    nums = _numbers_ignore_brackets(srs)
                     n_total = len(nums)
                     n_par = sum(1 for x in nums if float(x) >= float(class_par))
                     totals.append(n_total)
@@ -769,7 +800,14 @@ with TAB_PACE:
             df["Speed_TotalRuns"] = totals
             df["Speed_RunsAtPar"] = atpar
             df["Speed_ParPct"] = pct
-            df["SpeedConsistency_Score"] = df["Speed_ParPct"].apply(lambda x: consistency_score_from_ratio(float(x)) if pd.notna(x) else None)
+
+            # UPDATED: Score out of 10 + one-hit-wonder rule
+            df["SpeedConsistency_Score"] = [
+                consistency_score_from_ratio(p, t, a)
+                for p, t, a in zip(df["Speed_ParPct"].tolist(),
+                                   df["Speed_TotalRuns"].tolist(),
+                                   df["Speed_RunsAtPar"].tolist())
+            ]
 
             # =========================
             # OUTPUTS
