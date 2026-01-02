@@ -329,7 +329,6 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
     prom_q     = d[(d["style"]=="Prominent") & (d["lcp"]=="Questionable")]
 
     n_front, n_fh, n_ph, n_fq, n_pq = len(front_all), len(front_high), len(prom_high), len(front_q), len(prom_q)
-    n_high_early = n_fh + n_ph
 
     W_FH, W_PH, W_FQ, W_PQ = 2.0, 0.8, 0.5, 0.2
     energy = (W_FH*n_fh) + (W_PH*n_ph) + (W_FQ*n_fq) + (W_PQ*n_pq)
@@ -681,7 +680,7 @@ with TAB_PACE:
             else:
                 df["Scenario"] = scenario
 
-            # --------- NEW: Late-Strong warn + watch (computed AFTER Hybrid is final) ---------
+            # ---- Late-Strong warning STRICTLY when Hybrid is active (and 6f) ----
             late_strong_warn = late_strong_warn_hybrid_only_6f(
                 distance_f=distance_f,
                 use_hybrid=use_hyb,
@@ -691,17 +690,38 @@ with TAB_PACE:
             )
             debug["late_strong_warn"] = bool(late_strong_warn)
 
+            # ---- Late-Strong "Watch" horses: find Pocklington-type profiles ----
+            # We want: steady-early types (Slow good) that do NOT want full Strong all the way.
+            # Key metric: Slow - Strong (bigger = more "late-strong", less "true strong burn-up")
             debug["late_strong_watch"] = []
             if debug["late_strong_warn"]:
                 tmp = df.copy()
-                tmp["LateKick"] = (tmp["Suitability_Strong"] - tmp["Suitability_Even"])
-                tmp = tmp[tmp["Style"].isin(["Prominent", "Mid", "Hold-up"])].copy()
-                tmp = tmp.sort_values(["LateKick", "Suitability_Strong"], ascending=False)
-                watch = tmp[tmp["LateKick"] > 0].head(2)["Horse"].tolist()
-                if not watch:
+
+                tmp["LateStrongProfile"] = (tmp["Suitability_Slow"] - tmp["Suitability_Strong"])
+
+                # Avoid deep closers: late-strong is first-wave / trackers, not rear lottery
+                tmp = tmp[tmp["Style"].isin(["Front", "Prominent", "Mid"])].copy()
+
+                # Guardrails so we don’t return nonsense:
+                # - must be genuinely comfortable in slow/steady early
+                # - must be at least "serviceable" in Even (so not needing everything handed to them)
+                tmp = tmp[(tmp["Suitability_Slow"] >= 3.6) & (tmp["Suitability_Even"] >= 3.1)].copy()
+
+                # Rank by LateStrongProfile first, then Slow suitability, then overall base
+                tmp = tmp.sort_values(
+                    ["LateStrongProfile", "Suitability_Slow", "Suitability_Base"],
+                    ascending=False
+                )
+
+                # Require a meaningful separation (so we don't just list random horses)
+                # Pocklington-style tends to show up as 0.6+ (often bigger)
+                watch = tmp[tmp["LateStrongProfile"] >= 0.6].head(2)["Horse"].tolist()
+
+                # Fallback: if nothing passes the threshold, take best profile anyway (but only 1)
+                if not watch and not tmp.empty:
                     watch = tmp.head(1)["Horse"].tolist()
+
                 debug["late_strong_watch"] = watch
-            # ------------------------------------------------------------------------------
 
             df["wp"], df["ws"] = wp, ws
             df["Confidence"] = conf_display
