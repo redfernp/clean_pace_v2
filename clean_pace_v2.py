@@ -456,9 +456,8 @@ def conditions_score_from_mean(x: Optional[float]) -> Optional[float]:
 
 def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_par: int) -> Optional[float]:
     """
-    UPDATED (ONLY speed consistency):
-    - Score out of 10
-    - One-hit wonder rule: if total_runs == 1 and it beat par -> 8 (even if 100%)
+    Speed consistency score out of 10, mapped directly to ParPct (%).
+    Exception: if only 1 run and it beat/equals par -> score 8 (not 10).
     """
     if r is None or (isinstance(r, float) and np.isnan(r)):
         return None
@@ -469,18 +468,18 @@ def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_pa
     if total_runs <= 0:
         return None
 
+    # one-hit-wonder cap
     if total_runs == 1 and runs_at_par >= 1:
         return 8.0
 
     rr = float(r)
-    if rr >= 0.70: return 10.0
-    if rr >= 0.60: return 9.0
-    if rr >= 0.50: return 8.0
-    if rr >= 0.40: return 7.0
-    if rr >= 0.30: return 6.0
-    if rr >= 0.20: return 5.0
-    if rr >= 0.10: return 4.0
-    return 3.0
+    # map % -> /10
+    score = round(rr * 10)
+
+    # optional: clamp bounds
+    score = max(0, min(10, score))  # or max(1, ...) if you hate zeros
+    return float(score)
+
 
 # =========================
 # Tabs UI
@@ -888,3 +887,4 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
+
