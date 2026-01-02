@@ -666,29 +666,6 @@ with TAB_PACE:
                     counts=debug.get("counts", {})
                 )
 
-            # Build Late-Strong warning STRICTLY when Hybrid is active
-            late_strong_warn = late_strong_warn_hybrid_only_6f(
-                distance_f=distance_f,
-                use_hybrid=use_hyb,
-                confidence=conf_numeric,
-                counts=debug.get("counts", {}),
-                energy=debug.get("early_energy", 0.0),
-            )
-            debug["late_strong_warn"] = bool(late_strong_warn)
-
-            # If warning is on, choose "watch" horses: biggest improvers Even→Strong
-            debug["late_strong_watch"] = []
-            if debug["late_strong_warn"]:
-                tmp = df.copy()
-                tmp["LateKick"] = (tmp["Suitability_Strong"] - tmp["Suitability_Even"])
-                # prefer non-Front profiles for the late-lift idea
-                tmp = tmp[tmp["Style"].isin(["Prominent", "Mid", "Hold-up"])].copy()
-                tmp = tmp.sort_values(["LateKick", "Suitability_Strong"], ascending=False)
-                watch = tmp[tmp["LateKick"] > 0].head(2)["Horse"].tolist()
-                if not watch:
-                    watch = tmp.head(1)["Horse"].tolist()
-                debug["late_strong_watch"] = watch
-
             if use_hyb:
                 debug["rules_applied"].append("Hybrid pace activated (Even + Strong, 60/40 weighted)")
                 if scenario.startswith("Even"):
@@ -703,6 +680,28 @@ with TAB_PACE:
                 df["Scenario"] = "Hybrid (Even–Strong)"
             else:
                 df["Scenario"] = scenario
+
+            # --------- NEW: Late-Strong warn + watch (computed AFTER Hybrid is final) ---------
+            late_strong_warn = late_strong_warn_hybrid_only_6f(
+                distance_f=distance_f,
+                use_hybrid=use_hyb,
+                confidence=conf_numeric,
+                counts=debug.get("counts", {}),
+                energy=debug.get("early_energy", 0.0),
+            )
+            debug["late_strong_warn"] = bool(late_strong_warn)
+
+            debug["late_strong_watch"] = []
+            if debug["late_strong_warn"]:
+                tmp = df.copy()
+                tmp["LateKick"] = (tmp["Suitability_Strong"] - tmp["Suitability_Even"])
+                tmp = tmp[tmp["Style"].isin(["Prominent", "Mid", "Hold-up"])].copy()
+                tmp = tmp.sort_values(["LateKick", "Suitability_Strong"], ascending=False)
+                watch = tmp[tmp["LateKick"] > 0].head(2)["Horse"].tolist()
+                if not watch:
+                    watch = tmp.head(1)["Horse"].tolist()
+                debug["late_strong_watch"] = watch
+            # ------------------------------------------------------------------------------
 
             df["wp"], df["ws"] = wp, ws
             df["Confidence"] = conf_display
