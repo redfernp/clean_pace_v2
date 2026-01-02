@@ -197,14 +197,18 @@ def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
     out["AvgAll"]   = all_list
     out["KeySpeedAvg"] = keyavg_list
 
+    # CHANGED: keep totals per condition too (needed for new 0–10 Conditions scoring rules)
     for col in ["crs","dist","lhrh","going","cls","runpm1","trackstyle"]:
         if col in out.columns:
-            out[f"{col}_place"] = [ _parse_wpt_value(v)[0] for v in out[col].fillna("") ]
+            parsed = [_parse_wpt_value(v) for v in out[col].fillna("")]
+            out[f"{col}_place"] = [p[0] for p in parsed]
+            out[f"{col}_total"] = [p[3] for p in parsed]
 
     keep = ["Horse",
             "SpeedRunsRaw","SpeedRunsList",
             "LastRace","Highest","Avg3","AvgAll","KeySpeedAvg",
-            "crs_place","dist_place","lhrh_place","going_place","cls_place","runpm1_place","trackstyle_place"]
+            "crs_place","dist_place","lhrh_place","going_place","cls_place","runpm1_place","trackstyle_place",
+            "crs_total","dist_total","lhrh_total","going_total","cls_total","runpm1_total","trackstyle_total"]
     keep = [c for c in keep if c in out.columns]
     return out[keep]
 
@@ -444,15 +448,34 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
 # Diagnostics (NEW, separate; no effect on Suitability)
 # =========================
 COND_COLS = ["dist_place","cls_place","runpm1_place","trackstyle_place","crs_place","lhrh_place","going_place"]
+COND_TOTAL_COLS = ["dist_total","cls_total","runpm1_total","trackstyle_total","crs_total","lhrh_total","going_total"]
 
-def conditions_score_from_mean(x: Optional[float]) -> Optional[float]:
-    if x is None or (isinstance(x, float) and np.isnan(x)):
+# CHANGED: Conditions score now out of 10 with evidence discounts + one-run placed cap
+def conditions_score_from_mean(mean_val: Optional[float], count: int, one_run_placed: bool) -> Optional[float]:
+    """
+    Conditions score out of 10 based on mean place-rate (0..1).
+    - base = mean * 10
+    - if only 6 conditions -> reduce by 14%
+    - if 5 or fewer -> reduce by 28%
+    - if ANY condition has only 1 run and it placed -> cap at 8 (discount ~20% from perfect)
+    """
+    if mean_val is None or (isinstance(mean_val, float) and np.isnan(mean_val)):
         return None
-    if x >= 0.40: return 5.0
-    if x >= 0.30: return 4.0
-    if x >= 0.20: return 3.0
-    if x >= 0.10: return 2.0
-    return 1.0
+
+    score = float(mean_val) * 10.0
+
+    # evidence discount by number of condition lines present
+    if int(count) == 6:
+        score *= 0.86
+    elif int(count) <= 5:
+        score *= 0.72
+
+    # one-run placed cap
+    if one_run_placed:
+        score = min(score, 8.0)
+
+    score = max(0.0, min(10.0, score))
+    return round(score, 1)
 
 def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_par: int) -> Optional[float]:
     """
@@ -479,7 +502,6 @@ def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_pa
     # optional: clamp bounds
     score = max(0, min(10, score))  # or max(1, ...) if you hate zeros
     return float(score)
-
 
 # =========================
 # Tabs UI
@@ -761,19 +783,46 @@ with TAB_PACE:
             # =========================
             # Diagnostics (separate)
             # =========================
-            # Conditions score
+            # Conditions score  <-- CHANGED TO 0–10 + discounts + one-run placed cap
             cond_cols_present = [c for c in COND_COLS if c in df.columns]
+            total_cols_present = [c for c in COND_TOTAL_COLS if c in df.columns]
+
             if cond_cols_present:
                 df["Conditions_Count"] = df[cond_cols_present].notna().sum(axis=1)
                 df["Conditions_Mean"] = df[cond_cols_present].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
-                df["Conditions_Score"] = df["Conditions_Mean"].apply(lambda x: conditions_score_from_mean(float(x)) if pd.notna(x) else None)
+
+                # One-run placed flag: any condition with total==1 and place>0
+                df["Conditions_OneRunPlaced"] = False
+                if total_cols_present:
+                    flags = []
+                    for _, r in df.iterrows():
+                        flag = False
+                        for base in ["crs","dist","lhrh","going","cls","runpm1","trackstyle"]:
+                            pcol = f"{base}_place"
+                            tcol = f"{base}_total"
+                            if pcol in df.columns and tcol in df.columns:
+                                t = r.get(tcol, None)
+                                p = r.get(pcol, None)
+                                if pd.notna(t) and int(t) == 1 and pd.notna(p) and float(p) > 0:
+                                    flag = True
+                                    break
+                        flags.append(flag)
+                    df["Conditions_OneRunPlaced"] = flags
+
+                df["Conditions_Score"] = [
+                    conditions_score_from_mean(m, int(c), bool(one))
+                    for m, c, one in zip(df["Conditions_Mean"].tolist(),
+                                         df["Conditions_Count"].tolist(),
+                                         df["Conditions_OneRunPlaced"].tolist())
+                ]
             else:
                 df["Conditions_Count"] = 0
                 df["Conditions_Mean"] = np.nan
+                df["Conditions_OneRunPlaced"] = False
                 df["Conditions_Score"] = None
 
             # =========================
-            # Speed consistency (runs >= Par)  <-- ONLY SECTION CHANGED
+            # Speed consistency (runs >= Par)  <-- ONLY SECTION CHANGED (kept as-is)
             # =========================
             sr_col = None
             for cand in ["SpeedRunsRaw","speed_series","SpeedRunsList"]:
@@ -859,7 +908,10 @@ with TAB_PACE:
             st.dataframe(df[raw_cond_cols], use_container_width=True)
 
             st.markdown("### 2) Conditions — Score Breakdown")
-            cond_break = df[["Horse","Conditions_Count","Conditions_Mean","Conditions_Score"]].copy()
+            # CHANGED: still shows Mean, but Score is now out of 10
+            cond_break_cols = ["Horse","Conditions_Count","Conditions_Mean","Conditions_Score"]
+            cond_break_cols = [c for c in cond_break_cols if c in df.columns]
+            cond_break = df[cond_break_cols].copy()
             st.dataframe(cond_break, use_container_width=True)
 
             st.markdown("### 3) Speed History — Raw (parroted)")
@@ -887,4 +939,3 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
-
