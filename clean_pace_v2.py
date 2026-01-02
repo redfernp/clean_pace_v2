@@ -36,23 +36,8 @@ def _rs_category_from_value(avg: Optional[float], front_thr=1.6, prom_thr=2.4, m
     if avg < mid_thr:   return "Mid"
     return "Hold-up"
 
-def _strip_parenthetical(s: str) -> str:
-    """
-    Remove any parenthetical block like '(78)' from speed-series strings.
-    That bracketed number is the average, not a run.
-    """
-    return re.sub(r"\([^)]*\)", "", str(s))
-
 def _numbers(s: str) -> List[float]:
     return [float(x) for x in re.findall(r"-?\d+\.?\d*", str(s))]
-
-def _numbers_speed_series(s: str) -> List[float]:
-    """
-    Speed series extractor that ignores bracketed averages, e.g.
-    '77, 85, 83 (82)' -> [77, 85, 83]
-    """
-    s2 = _strip_parenthetical(str(s))
-    return [float(x) for x in re.findall(r"-?\d+\.?\d*", s2)]
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
@@ -142,8 +127,7 @@ def _parse_wpt_value(val: str) -> Tuple[Optional[float], Optional[int], Optional
     return place, w, p, t
 
 def _parse_speed_series(s: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-    # IMPORTANT: ignore bracketed average '(xx)'
-    nums = _numbers_speed_series(s)
+    nums = _numbers(s)
     if not nums: return None, None, None, None
     last = nums[-1]; highest = max(nums)
     avg3 = round(sum(nums[-3:])/min(3, len(nums)), 1)
@@ -184,11 +168,12 @@ def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
     if df_raw.empty: return df_raw.copy()
     out = df_raw.copy()
 
+    # keep raw series for transparency
     out["SpeedRunsRaw"] = out["speed_series"].fillna("").astype(str)
 
     last_list, high_list, avg3_list, all_list, keyavg_list, runs_list_str = [], [], [], [], [], []
     for s in out["SpeedRunsRaw"].fillna(""):
-        nums = _numbers_speed_series(s)  # ignore bracketed average
+        nums = _numbers(s)
         runs_list_str.append(", ".join([str(int(x)) if float(x).is_integer() else str(x) for x in nums]) if nums else "")
 
         last, high, avg3, avgall = _parse_speed_series(s)
@@ -314,13 +299,18 @@ def late_strong_warn_hybrid_only_6f(distance_f: float,
     e = float(energy)
     c = float(confidence) if confidence is not None else 0.0
 
+    # needs at least 2 credible early to create the "late lift" dynamic
     if total_high < 2:
         return False
+
+    # avoid true burn-ups (that’s just Strong, not "late-strong")
     if FH >= 3:
         return False
 
+    # confidence + energy gates
     if 0.55 <= c <= 0.85 and e >= 3.2:
         return True
+
     return False
 
 # =========================
@@ -344,10 +334,12 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
     energy = (W_FH*n_fh) + (W_PH*n_ph) + (W_FQ*n_fq) + (W_PQ*n_pq)
 
     band = _dist_band(s.distance_f)
+    locked_strong = False
 
     # --- 3-LCP guarantee rule (FRONT ONLY) ---
     if n_fh >= 3:
         scenario, conf = "Strong", 0.80
+        locked_strong = True
         debug["rules_applied"].append("≥3 High-LCP Fronts → Strong (locked)")
     else:
         if n_fh >= 2:
@@ -440,7 +432,7 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
     return scenario, conf, lcp_map, debug
 
 # =========================
-# Diagnostics (separate; no effect on Suitability)
+# Diagnostics (NEW, separate; no effect on Suitability)
 # =========================
 COND_COLS = ["dist_place","cls_place","runpm1_place","trackstyle_place","crs_place","lhrh_place","going_place"]
 
@@ -453,31 +445,14 @@ def conditions_score_from_mean(x: Optional[float]) -> Optional[float]:
     if x >= 0.10: return 2.0
     return 1.0
 
-def speed_consistency_score_10(ratio: Optional[float], total_runs: int, runs_at_par: int) -> Optional[float]:
-    """
-    New: score out of 10.
-    Special rule requested:
-      - If total_runs == 1 and it beat par (100%), score = 8 (downplay one-hit wonders)
-    """
-    if ratio is None or (isinstance(ratio, float) and np.isnan(ratio)):
+def consistency_score_from_ratio(r: Optional[float]) -> Optional[float]:
+    if r is None or (isinstance(r, float) and np.isnan(r)):
         return None
-    total_runs = int(total_runs or 0)
-    runs_at_par = int(runs_at_par or 0)
-    if total_runs <= 0:
-        return None
-
-    if total_runs == 1 and runs_at_par >= 1:
-        return 8.0
-
-    r = float(ratio)
-    if r >= 0.70: return 10.0
-    if r >= 0.60: return 9.0
-    if r >= 0.50: return 8.0
-    if r >= 0.40: return 7.0
-    if r >= 0.30: return 6.0
-    if r >= 0.20: return 5.0
-    if r >= 0.10: return 4.0
-    return 3.0
+    if r >= 0.60: return 5.0
+    if r >= 0.45: return 4.0
+    if r >= 0.30: return 3.0
+    if r >= 0.15: return 2.0
+    return 1.0
 
 # =========================
 # Tabs UI
@@ -690,43 +665,6 @@ with TAB_PACE:
                     counts=debug.get("counts", {})
                 )
 
-            # Late-Strong warning STRICTLY when Hybrid is active
-            late_strong_warn = late_strong_warn_hybrid_only_6f(
-                distance_f=distance_f,
-                use_hybrid=use_hyb,
-                confidence=conf_numeric,
-                counts=debug.get("counts", {}),
-                energy=debug.get("early_energy", 0.0),
-            )
-            debug["late_strong_warn"] = bool(late_strong_warn)
-
-            # ---- FIXED WATCH LOGIC (this is the bit you said I broke) ----
-            # We now pick horses that are MUCH better in Slow than in the Hybrid blend,
-            # because that matches “not strong until late” (slow/controlled early, then lift late).
-            debug["late_strong_watch"] = []
-            if debug["late_strong_warn"]:
-                # compute the actual hybrid blend (same weights as later)
-                if scenario.startswith("Even"):
-                    hybrid_now = 0.6 * df["Suitability_Even"] + 0.4 * df["Suitability_Strong"]
-                elif scenario == "Strong":
-                    hybrid_now = 0.6 * df["Suitability_Strong"] + 0.4 * df["Suitability_Even"]
-                else:
-                    hybrid_now = 0.5 * df["Suitability_Even"] + 0.5 * df["Suitability_Strong"]
-
-                tmp = df.copy()
-                tmp["HybridNow"] = hybrid_now
-                tmp["LateStrongEdge"] = tmp["Suitability_Slow"] - tmp["HybridNow"]  # POSITIVE => slow-better-than-hybrid
-
-                # late-strong winners are often Prominent/Mid (not necessarily Hold-up), never pure Front
-                tmp = tmp[tmp["Style"].isin(["Prominent", "Mid", "Hold-up"])].copy()
-                tmp = tmp.sort_values(["LateStrongEdge", "Suitability_Slow"], ascending=False)
-
-                watch = tmp[tmp["LateStrongEdge"] > 0].head(2)["Horse"].tolist()
-                if not watch:
-                    watch = tmp.head(1)["Horse"].tolist()
-                debug["late_strong_watch"] = watch
-
-            # Apply Hybrid blend (unchanged)
             if use_hyb:
                 debug["rules_applied"].append("Hybrid pace activated (Even + Strong, 60/40 weighted)")
                 if scenario.startswith("Even"):
@@ -741,6 +679,49 @@ with TAB_PACE:
                 df["Scenario"] = "Hybrid (Even–Strong)"
             else:
                 df["Scenario"] = scenario
+
+            # ---- Late-Strong warning STRICTLY when Hybrid is active (and 6f) ----
+            late_strong_warn = late_strong_warn_hybrid_only_6f(
+                distance_f=distance_f,
+                use_hybrid=use_hyb,
+                confidence=conf_numeric,
+                counts=debug.get("counts", {}),
+                energy=debug.get("early_energy", 0.0),
+            )
+            debug["late_strong_warn"] = bool(late_strong_warn)
+
+            # ---- Late-Strong "Watch" horses: find Pocklington-type profiles ----
+            # We want: steady-early types (Slow good) that do NOT want full Strong all the way.
+            # Key metric: Slow - Strong (bigger = more "late-strong", less "true strong burn-up")
+            debug["late_strong_watch"] = []
+            if debug["late_strong_warn"]:
+                tmp = df.copy()
+
+                tmp["LateStrongProfile"] = (tmp["Suitability_Slow"] - tmp["Suitability_Strong"])
+
+                # Avoid deep closers: late-strong is first-wave / trackers, not rear lottery
+                tmp = tmp[tmp["Style"].isin(["Front", "Prominent", "Mid"])].copy()
+
+                # Guardrails so we don’t return nonsense:
+                # - must be genuinely comfortable in slow/steady early
+                # - must be at least "serviceable" in Even (so not needing everything handed to them)
+                tmp = tmp[(tmp["Suitability_Slow"] >= 3.6) & (tmp["Suitability_Even"] >= 3.1)].copy()
+
+                # Rank by LateStrongProfile first, then Slow suitability, then overall base
+                tmp = tmp.sort_values(
+                    ["LateStrongProfile", "Suitability_Slow", "Suitability_Base"],
+                    ascending=False
+                )
+
+                # Require a meaningful separation (so we don't just list random horses)
+                # Pocklington-style tends to show up as 0.6+ (often bigger)
+                watch = tmp[tmp["LateStrongProfile"] >= 0.6].head(2)["Horse"].tolist()
+
+                # Fallback: if nothing passes the threshold, take best profile anyway (but only 1)
+                if not watch and not tmp.empty:
+                    watch = tmp.head(1)["Horse"].tolist()
+
+                debug["late_strong_watch"] = watch
 
             df["wp"], df["ws"] = wp, ws
             df["Confidence"] = conf_display
@@ -764,7 +745,7 @@ with TAB_PACE:
                 df["Conditions_Mean"] = np.nan
                 df["Conditions_Score"] = None
 
-            # Speed consistency (runs >= Par) — FIXED: ignore bracketed average
+            # Speed consistency (runs >= Par)
             sr_col = None
             for cand in ["SpeedRunsRaw","speed_series","SpeedRunsList"]:
                 if cand in df.columns:
@@ -774,7 +755,7 @@ with TAB_PACE:
             totals, atpar, pct = [], [], []
             if sr_col is not None:
                 for srs in df[sr_col].fillna("").astype(str):
-                    nums = _numbers_speed_series(srs)  # IGNORE '(avg)'
+                    nums = _numbers(srs)
                     n_total = len(nums)
                     n_par = sum(1 for x in nums if float(x) >= float(class_par))
                     totals.append(n_total)
@@ -788,12 +769,7 @@ with TAB_PACE:
             df["Speed_TotalRuns"] = totals
             df["Speed_RunsAtPar"] = atpar
             df["Speed_ParPct"] = pct
-
-            # NEW: score out of 10 with the "one-hit wonder" rule
-            df["SpeedConsistency_Score"] = [
-                speed_consistency_score_10(p, t, a)
-                for p, t, a in zip(df["Speed_ParPct"].tolist(), df["Speed_TotalRuns"].tolist(), df["Speed_RunsAtPar"].tolist())
-            ]
+            df["SpeedConsistency_Score"] = df["Speed_ParPct"].apply(lambda x: consistency_score_from_ratio(float(x)) if pd.notna(x) else None)
 
             # =========================
             # OUTPUTS
@@ -815,7 +791,7 @@ with TAB_PACE:
                     st.markdown("**Rules applied:**")
                     for r in rules: st.write(f"• {r}")
 
-                # ---- UI CHANGE REQUESTED: add ONE extra line at the bottom ----
+                # ---- UI CHANGE REQUESTED: add ONE extra line at the bottom (ONLY when Hybrid is active AND warning triggers) ----
                 if debug.get("late_strong_warn", False):
                     watch = debug.get("late_strong_watch", [])
                     watch_txt = (f" **Watch:** {', '.join(watch)}" if watch else "")
