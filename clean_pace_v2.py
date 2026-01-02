@@ -287,6 +287,7 @@ def is_late_strong_6f(distance_f: float,
     """
     Display-only warning for 6f: race can *finish* Strong even if labelled Even/Hybrid.
     DOES NOT change scenario/hybrid/suitability; only drives one extra line of text.
+    NOTE: In the app logic this is now gated to only run when Hybrid is active.
     """
     # 6f band only
     if not (5.5 < float(distance_f) <= 6.5):
@@ -298,33 +299,25 @@ def is_late_strong_6f(distance_f: float,
     e = float(energy)
     c = float(confidence) if confidence is not None else 0.0
 
-    # We only care about "Even–Strong type" races (Even / Strong / Hybrid)
-    # NOTE: your UI scenario becomes "Hybrid (Even–Strong)" later, but at this point
-    # scenario is still the raw scenario from the pace engine.
+    # Even/Strong type only (raw scenario from pace engine)
     if scenario.startswith("Slow") or scenario.startswith("Very Strong"):
         return False
     if not (scenario.startswith("Even") or scenario == "Strong"):
         return False
 
-    # Needs credible early pressure (otherwise it's just Slow/Even)
+    # Needs credible early pressure
     if total_high < 2:
         return False
 
-    # If there are 3+ High fronts it's a true burn-up (Strong throughout), not "late-strong"
+    # If 3+ High fronts, it's a true burn-up (Strong throughout), not "late-strong"
     if FH >= 3:
         return False
 
-    # Key pattern you’re trying to capture:
-    # - 6f
-    # - multiple credible early (>=2)
-    # - energy can be high (like 4.8)
-    # - but not an extreme front-war (cap FH at 2)
-    # - confidence moderate-to-high
+    # Typical 6f hybrid profile that can "lift late"
     if FH in (1, 2) and total_high >= 2 and 0.55 <= c <= 0.80 and e >= 3.2:
         return True
 
     return False
-
 
 # =========================
 # Pace projection engine (advanced)
@@ -604,18 +597,6 @@ with TAB_PACE:
             else:
                 conf_display = f"{conf_numeric:.2f}"
 
-            # ---- Late-Strong (6f) warning flag (no UI change yet; just compute) ----
-            counts_for_warn = debug.get("counts", {})
-            energy_for_warn = debug.get("early_energy", 0.0)
-            late_strong_warn = is_late_strong_6f(
-                distance_f=distance_f,
-                scenario=scenario,
-                confidence=conf_numeric,
-                counts=counts_for_warn,
-                energy=energy_for_warn
-            )
-            debug["late_strong_warn"] = late_strong_warn
-
             # PaceFit maps by band
             band = "5f" if distance_f <= 5.5 else ("6f" if distance_f <= 6.5 else "route")
 
@@ -705,6 +686,20 @@ with TAB_PACE:
                 df["Scenario"] = "Hybrid (Even–Strong)"
             else:
                 df["Scenario"] = scenario
+
+            # ---- Late-Strong (6f) warning flag (STRICT: only when Hybrid is active) ----
+            if use_hyb:
+                counts_for_warn = debug.get("counts", {})
+                energy_for_warn = debug.get("early_energy", 0.0)
+                debug["late_strong_warn"] = is_late_strong_6f(
+                    distance_f=distance_f,
+                    scenario=scenario,      # raw scenario still Even/Strong type here
+                    confidence=conf_numeric,
+                    counts=counts_for_warn,
+                    energy=energy_for_warn
+                )
+            else:
+                debug["late_strong_warn"] = False
 
             df["wp"], df["ws"] = wp, ws
             df["Confidence"] = conf_display
@@ -831,4 +826,3 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
-
