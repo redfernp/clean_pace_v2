@@ -197,7 +197,7 @@ def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
     out["AvgAll"]   = all_list
     out["KeySpeedAvg"] = keyavg_list
 
-    # CHANGED: keep totals per condition too (needed for new 0–10 Conditions scoring rules)
+    # keep totals per condition too
     for col in ["crs","dist","lhrh","going","cls","runpm1","trackstyle"]:
         if col in out.columns:
             parsed = [_parse_wpt_value(v) for v in out[col].fillna("")]
@@ -262,15 +262,10 @@ def _lcp_from_dvp(style_cat: Optional[str], dvp: Optional[float], s: Settings) -
     if dvp >= s.lcp_question_low: return "Questionable"
     return "Unlikely"
 
-# ========= HYBRID PACE HELPER =========
 def should_use_hybrid(distance_f: float,
                       scenario: str,
                       confidence: float,
                       counts: dict) -> bool:
-    """
-    Determine whether to use a Hybrid Even/Strong suitability blend.
-    Hybrid pace only useful at <= 8f and when scenario/confidence is borderline.
-    """
     FH = counts.get("Front_High", 0)
     PH = counts.get("Prominent_High", 0)
     total_high = FH + PH
@@ -291,16 +286,11 @@ def should_use_hybrid(distance_f: float,
         return True
     return False
 
-# ========= LATE-STRONG (6f) WARNING TAG (DISPLAY ONLY) =========
 def late_strong_warn_hybrid_only_6f(distance_f: float,
                                    use_hybrid: bool,
                                    confidence: float,
                                    counts: dict,
                                    energy: float) -> bool:
-    """
-    STRICT: only when Hybrid is actually active.
-    Display-only warning for 6f: race can *finish* Strong even when model blends Even/Strong.
-    """
     if not use_hybrid:
         return False
     if not (5.5 < float(distance_f) <= 6.5):
@@ -312,23 +302,15 @@ def late_strong_warn_hybrid_only_6f(distance_f: float,
     e = float(energy)
     c = float(confidence) if confidence is not None else 0.0
 
-    # needs at least 2 credible early to create the "late lift" dynamic
     if total_high < 2:
         return False
-
-    # avoid true burn-ups (that’s just Strong, not "late-strong")
     if FH >= 3:
         return False
 
-    # confidence + energy gates
     if 0.55 <= c <= 0.85 and e >= 3.2:
         return True
-
     return False
 
-# =========================
-# Pace projection engine (advanced)
-# =========================
 def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float,Dict[str,str],Dict[str,object]]:
     debug = {"rules_applied": []}
     if not rows: return "N/A", 0.0, {}, {"error": "no rows"}
@@ -341,18 +323,19 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
     front_q    = d[(d["style"]=="Front") & (d["lcp"]=="Questionable")]
     prom_q     = d[(d["style"]=="Prominent") & (d["lcp"]=="Questionable")]
 
-    n_front, n_fh, n_ph, n_fq, n_pq = len(front_all), len(front_high), len(prom_high), len(front_q), len(prom_q)
+    n_front = len(front_all)
+    n_fh = len(front_high)
+    n_ph = len(prom_high)
+    n_fq = len(front_q)
+    n_pq = len(prom_q)
 
     W_FH, W_PH, W_FQ, W_PQ = 2.0, 0.8, 0.5, 0.2
     energy = (W_FH*n_fh) + (W_PH*n_ph) + (W_FQ*n_fq) + (W_PQ*n_pq)
 
     band = _dist_band(s.distance_f)
-    locked_strong = False
 
-    # --- 3-LCP guarantee rule (FRONT ONLY) ---
     if n_fh >= 3:
         scenario, conf = "Strong", 0.80
-        locked_strong = True
         debug["rules_applied"].append("≥3 High-LCP Fronts → Strong (locked)")
     else:
         if n_fh >= 2:
@@ -450,27 +433,16 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
 COND_COLS = ["dist_place","cls_place","runpm1_place","trackstyle_place","crs_place","lhrh_place","going_place"]
 COND_TOTAL_COLS = ["dist_total","cls_total","runpm1_total","trackstyle_total","crs_total","lhrh_total","going_total"]
 
-# CHANGED: Conditions score now out of 10 with evidence discounts + one-run placed cap
 def conditions_score_from_mean(mean_val: Optional[float], count: int, one_run_placed: bool) -> Optional[float]:
-    """
-    Conditions score out of 10 based on mean place-rate (0..1).
-    - base = mean * 10
-    - if only 6 conditions -> reduce by 14%
-    - if 5 or fewer -> reduce by 28%
-    - if ANY condition has only 1 run and it placed -> cap at 8 (discount ~20% from perfect)
-    """
     if mean_val is None or (isinstance(mean_val, float) and np.isnan(mean_val)):
         return None
 
     score = float(mean_val) * 10.0
-
-    # evidence discount by number of condition lines present
     if int(count) == 6:
         score *= 0.86
     elif int(count) <= 5:
         score *= 0.72
 
-    # one-run placed cap
     if one_run_placed:
         score = min(score, 8.0)
 
@@ -478,10 +450,6 @@ def conditions_score_from_mean(mean_val: Optional[float], count: int, one_run_pl
     return round(score, 1)
 
 def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_par: int) -> Optional[float]:
-    """
-    Speed consistency score out of 10, mapped directly to ParPct (%).
-    Exception: if only 1 run and it beat/equals par -> score 8 (not 10).
-    """
     if r is None or (isinstance(r, float) and np.isnan(r)):
         return None
 
@@ -491,16 +459,12 @@ def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_pa
     if total_runs <= 0:
         return None
 
-    # one-hit-wonder cap
     if total_runs == 1 and runs_at_par >= 1:
         return 8.0
 
     rr = float(r)
-    # map % -> /10
     score = round(rr * 10)
-
-    # optional: clamp bounds
-    score = max(0, min(10, score))  # or max(1, ...) if you hate zeros
+    score = max(0, min(10, score))
     return float(score)
 
 # =========================
@@ -508,7 +472,6 @@ def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_pa
 # =========================
 TAB_MAIN, TAB_PACE = st.tabs(["All Inputs (2 boxes)", "Pace & Backbone + Diagnostics (from Combined CSV)"])
 
-# ---------- TAB 1: Inputs ----------
 with TAB_MAIN:
     st.subheader("Box A — Run Style ONLY")
     st.caption("Paste ONLY the Run Style Figure table. (No Official Ratings, no Race Class section.)")
@@ -526,7 +489,6 @@ with TAB_MAIN:
     if st.button("🚀 Process All (A + B)"):
         try:
             rs_df = parse_run_style(boxA, front_thr, prom_thr, mid_thr)
-
             b_raw = parse_box45_single(boxB) if boxB.strip() else pd.DataFrame(columns=["Horse"])
             b_df = build_speed_conditions(b_raw) if not b_raw.empty else pd.DataFrame(columns=["Horse"])
 
@@ -553,7 +515,6 @@ with TAB_MAIN:
         except Exception as e:
             st.error(f"Failed: {e}")
 
-# ---------- TAB 2: Backbone + Diagnostics ----------
 with TAB_PACE:
     st.subheader("Upload 🧩 Combined Output (A + B) CSV")
     upl = st.file_uploader("Combined CSV", type=["csv"], key="pace_csv")
@@ -579,7 +540,6 @@ with TAB_PACE:
                 st.error("Missing column in CSV: Horse"); st.stop()
             df["Horse"] = df["Horse"].astype(str).str.strip()
 
-            # ------- Robust AdjSpeed & RS_Avg mapping -------
             adjspeed_aliases = [
                 "AdjSpeed","KeySpeedAvg","Key Speed Factors Average",
                 "Key_Speed_Factors_Average","Adjusted Speed","Adjusted_Speed","KeySpeed"
@@ -612,15 +572,12 @@ with TAB_PACE:
             else:
                 df["RS_Avg10"] = np.nan
 
-            # Δ vs Par + Style
             df["ΔvsPar"] = pd.to_numeric(df["AdjSpeed"], errors="coerce") - float(class_par)
             df["Style"] = df["RS_Avg"].apply(lambda x: _rs_category_from_value(x, 1.6, 2.4, 3.0))
 
-            # LCP from Δ vs Par only for Front/Prominent
             s = Settings(class_par=class_par, distance_f=distance_f, wp_even=wp_even, wp_confident=wp_conf)
             df["LCP"] = df.apply(lambda r: _lcp_from_dvp(r["Style"], r["ΔvsPar"], s), axis=1)
 
-            # Build rows for pace projection
             rows = [HorseRow(
                 horse=r.Horse,
                 style_cat=r.Style,
@@ -630,7 +587,6 @@ with TAB_PACE:
             ) for _, r in df.iterrows()]
             scenario, conf_numeric, lcp_map, debug = project_pace_from_rows(rows, s)
 
-            # Apply manual override if selected
             if pace_override != "Auto":
                 debug["rules_applied"].append(f"Manual override applied: {pace_override}")
                 debug["manual_override"] = pace_override
@@ -639,10 +595,8 @@ with TAB_PACE:
             else:
                 conf_display = f"{conf_numeric:.2f}"
 
-            # PaceFit maps by band
             band = "5f" if distance_f <= 5.5 else ("6f" if distance_f <= 6.5 else "route")
 
-            # Even & Strong maps (for Hybrid and scenario sensitivity)
             if band == "5f":
                 even_map = PACEFIT_5F["Even"]
                 strong_map = PACEFIT_5F["Strong"]
@@ -656,7 +610,6 @@ with TAB_PACE:
                 strong_map = PACEFIT["Strong"]
                 slow_map = PACEFIT["Slow"]
 
-            # Final scenario-specific map (for base Suitability)
             if scenario.startswith("Even (Front-Controlled)") and band == "route":
                 pacefit_map = PACEFIT_EVEN_FC
             elif band == "5f":
@@ -667,13 +620,11 @@ with TAB_PACE:
                 key = "Even" if scenario.startswith("Even") else scenario
                 pacefit_map = PACEFIT.get(key, PACEFIT["Even"])
 
-            # Pace/Speed weights (same backbone rules)
             wp = s.wp_confident if (scenario in ("Slow","Very Strong") and conf_numeric >= 0.65) else s.wp_even
             if band == "5f": wp = max(wp, 0.60)
             elif band == "6f": wp = max(wp, 0.55)
             ws = 1 - wp
 
-            # SpeedFit
             def _speedfit(v):
                 if pd.isna(v): return 2.3
                 v = float(v)
@@ -682,12 +633,11 @@ with TAB_PACE:
                 if v >= -4: return 3.0
                 if v >= -8: return 2.0
                 return 1.0
+
             df["SpeedFit"] = df["ΔvsPar"].apply(_speedfit)
 
-            # Base PaceFit (scenario) + base Suitability
             df["PaceFit"] = df["Style"].map(pacefit_map).fillna(3.0)
 
-            # Scenario sensitivity (requested): Suitability under Slow/Even/Strong
             df["PaceFit_Slow"]   = df["Style"].map(slow_map).fillna(3.0)
             df["PaceFit_Even"]   = df["Style"].map(even_map).fillna(3.0)
             df["PaceFit_Strong"] = df["Style"].map(strong_map).fillna(3.0)
@@ -696,15 +646,12 @@ with TAB_PACE:
             df["Suitability_Even"]   = df["PaceFit_Even"]   * wp + df["SpeedFit"] * ws
             df["Suitability_Strong"] = df["PaceFit_Strong"] * wp + df["SpeedFit"] * ws
 
-            # Base Even/Strong suitability bases (for Hybrid engine)
             df["Suitability_Base_Even"]   = df["Suitability_Even"]
             df["Suitability_Base_Strong"] = df["Suitability_Strong"]
 
-            # Start with scenario-based base (non-hybrid)
             df["Suitability_Base"] = df["PaceFit"] * wp + df["SpeedFit"] * ws
-            df["Suitability_Base_Hybrid"] = df["Suitability_Base_Even"]  # default
+            df["Suitability_Base_Hybrid"] = df["Suitability_Base_Even"]
 
-            # HYBRID PACE — only if Auto
             use_hyb = False
             if pace_override == "Auto":
                 use_hyb = should_use_hybrid(
@@ -729,7 +676,6 @@ with TAB_PACE:
             else:
                 df["Scenario"] = scenario
 
-            # ---- Late-Strong warning STRICTLY when Hybrid is active (and 6f) ----
             late_strong_warn = late_strong_warn_hybrid_only_6f(
                 distance_f=distance_f,
                 use_hybrid=use_hyb,
@@ -739,51 +685,31 @@ with TAB_PACE:
             )
             debug["late_strong_warn"] = bool(late_strong_warn)
 
-            # ---- Late-Strong "Watch" horses: find Pocklington-type profiles ----
-            # We want: steady-early types (Slow good) that do NOT want full Strong all the way.
-            # Key metric: Slow - Strong (bigger = more "late-strong", less "true strong burn-up")
             debug["late_strong_watch"] = []
             if debug["late_strong_warn"]:
                 tmp = df.copy()
-
                 tmp["LateStrongProfile"] = (tmp["Suitability_Slow"] - tmp["Suitability_Strong"])
-
-                # Avoid deep closers: late-strong is first-wave / trackers, not rear lottery
                 tmp = tmp[tmp["Style"].isin(["Front", "Prominent", "Mid"])].copy()
-
-                # Guardrails so we don’t return nonsense:
-                # - must be genuinely comfortable in slow/steady early
-                # - must be at least "serviceable" in Even (so not needing everything handed to them)
                 tmp = tmp[(tmp["Suitability_Slow"] >= 3.6) & (tmp["Suitability_Even"] >= 3.1)].copy()
-
-                # Rank by LateStrongProfile first, then Slow suitability, then overall base
                 tmp = tmp.sort_values(
                     ["LateStrongProfile", "Suitability_Slow", "Suitability_Base"],
                     ascending=False
                 )
-
-                # Require a meaningful separation (so we don't just list random horses)
-                # Pocklington-style tends to show up as 0.6+ (often bigger)
                 watch = tmp[tmp["LateStrongProfile"] >= 0.6].head(2)["Horse"].tolist()
-
-                # Fallback: if nothing passes the threshold, take best profile anyway (but only 1)
                 if not watch and not tmp.empty:
                     watch = tmp.head(1)["Horse"].tolist()
-
                 debug["late_strong_watch"] = watch
 
             df["wp"], df["ws"] = wp, ws
             df["Confidence"] = conf_display
 
-            # FINAL Suitability (backbone only; no OR/Class/Cond additions)
             df["Suitability"] = df["Suitability_Base"]
             if clip5:
                 df["Suitability"] = df["Suitability"].clip(1.0, 5.0)
 
             # =========================
-            # Diagnostics (separate)
+            # Diagnostics
             # =========================
-            # Conditions score  <-- CHANGED TO 0–10 + discounts + one-run placed cap
             cond_cols_present = [c for c in COND_COLS if c in df.columns]
             total_cols_present = [c for c in COND_TOTAL_COLS if c in df.columns]
 
@@ -791,7 +717,6 @@ with TAB_PACE:
                 df["Conditions_Count"] = df[cond_cols_present].notna().sum(axis=1)
                 df["Conditions_Mean"] = df[cond_cols_present].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
 
-                # One-run placed flag: any condition with total==1 and place>0
                 df["Conditions_OneRunPlaced"] = False
                 if total_cols_present:
                     flags = []
@@ -821,9 +746,6 @@ with TAB_PACE:
                 df["Conditions_OneRunPlaced"] = False
                 df["Conditions_Score"] = None
 
-            # =========================
-            # Speed consistency (runs >= Par)  <-- ONLY SECTION CHANGED (kept as-is)
-            # =========================
             sr_col = None
             for cand in ["SpeedRunsRaw","speed_series","SpeedRunsList"]:
                 if cand in df.columns:
@@ -833,7 +755,6 @@ with TAB_PACE:
             totals, atpar, pct = [], [], []
             if sr_col is not None:
                 for srs in df[sr_col].fillna("").astype(str):
-                    # FIX: ignore bracketed average like "(78)"
                     nums = _numbers_ignore_brackets(srs)
                     n_total = len(nums)
                     n_par = sum(1 for x in nums if float(x) >= float(class_par))
@@ -849,7 +770,6 @@ with TAB_PACE:
             df["Speed_RunsAtPar"] = atpar
             df["Speed_ParPct"] = pct
 
-            # UPDATED: Score out of 10 + one-hit-wonder rule
             df["SpeedConsistency_Score"] = [
                 consistency_score_from_ratio(p, t, a)
                 for p, t, a in zip(df["Speed_ParPct"].tolist(),
@@ -877,7 +797,6 @@ with TAB_PACE:
                     st.markdown("**Rules applied:**")
                     for r in rules: st.write(f"• {r}")
 
-                # ---- UI CHANGE REQUESTED: add ONE extra line at the bottom (ONLY when Hybrid is active AND warning triggers) ----
                 if debug.get("late_strong_warn", False):
                     watch = debug.get("late_strong_watch", [])
                     watch_txt = (f" **Watch:** {', '.join(watch)}" if watch else "")
@@ -908,7 +827,6 @@ with TAB_PACE:
             st.dataframe(df[raw_cond_cols], use_container_width=True)
 
             st.markdown("### 2) Conditions — Score Breakdown")
-            # CHANGED: still shows Mean, but Score is now out of 10
             cond_break_cols = ["Horse","Conditions_Count","Conditions_Mean","Conditions_Score"]
             cond_break_cols = [c for c in cond_break_cols if c in df.columns]
             cond_break = df[cond_break_cols].copy()
@@ -929,6 +847,172 @@ with TAB_PACE:
             overlay_cols = ["Horse","Suitability","Suitability_Even","Suitability_Strong","Suitability_Slow","Conditions_Score","SpeedConsistency_Score"]
             overlay_cols = [c for c in overlay_cols if c in df.columns]
             st.dataframe(df[overlay_cols].sort_values(["Suitability"], ascending=False), use_container_width=True)
+
+            # =========================
+            # NEW BOX: Tissue v2 (pricing layer only; does not affect backbone/diagnostics)
+            # =========================
+            st.markdown("## 💷 Tissue Prices v2 (Softmax + Evidence Control)")
+
+            with st.expander("Tissue v2 settings (does not change backbone)", expanded=True):
+                tc = st.columns(6)
+                w_suit = tc[0].slider("Weight: Suitability", 0.0, 1.0, 0.50, 0.05)
+                w_cond = tc[1].slider("Weight: Conditions", 0.0, 1.0, 0.20, 0.05)
+                w_spc  = tc[2].slider("Weight: SpeedConsistency", 0.0, 1.0, 0.30, 0.05)
+                temp   = tc[3].slider("Softmax temperature (lower = stronger favs)", 0.05, 0.50, 0.18, 0.01)
+                k_shrk = tc[4].slider("Evidence shrink strength (k)", 1.0, 12.0, 6.0, 0.5)
+                prior_mode = tc[5].selectbox("Missing-data prior", ["Neutral (0.50)", "Race mean"], index=1)
+
+                oc = st.columns(4)
+                use_overround = oc[0].checkbox("Apply overround (book %)", value=False)
+                target_or = oc[1].slider("Target overround", 1.00, 1.30, 1.08, 0.01)
+                or_shape  = oc[2].slider("Fav/longshot shape", 0.00, 0.60, 0.15, 0.05)
+                show_value = oc[3].checkbox("Show value vs Market Odds (if column exists)", value=True)
+
+            def _clip01(x: float) -> float:
+                return float(np.clip(x, 0.0, 1.0))
+
+            def _to01_0to10(x):
+                if pd.isna(x):
+                    return np.nan
+                return _clip01(float(x) / 10.0)
+
+            def _to01_suit_1to5(x):
+                if pd.isna(x):
+                    return np.nan
+                return _clip01((float(x) - 1.0) / 4.0)
+
+            def _shrink(x01, n, prior01=0.5, k=6.0):
+                if pd.isna(x01):
+                    x01 = prior01
+                if pd.isna(n):
+                    n = 0.0
+                n = max(0.0, float(n))
+                w = n / (n + float(k)) if (n + float(k)) > 0 else 0.0
+                return _clip01(w * float(x01) + (1.0 - w) * float(prior01))
+
+            def _softmax(series: pd.Series, temperature: float) -> pd.Series:
+                t = max(1e-6, float(temperature))
+                a = series.astype(float).values
+                a = a - np.nanmax(a)
+                ex = np.exp(a / t)
+                ex = np.where(np.isfinite(ex), ex, 0.0)
+                ssum = ex.sum()
+                if ssum <= 0:
+                    return pd.Series(np.ones(len(series)) / max(1, len(series)), index=series.index)
+                return pd.Series(ex / ssum, index=series.index)
+
+            def _apply_overround(p_fair: pd.Series, overround=1.00, shape=0.15) -> pd.Series:
+                p = p_fair.clip(lower=1e-12).astype(float)
+                sh = float(np.clip(shape, 0.0, 0.60))
+                p2 = p ** (1.0 - sh)
+                p2 = p2 / p2.sum()
+                return p2 * float(overround)
+
+            def _odds(p: pd.Series) -> pd.Series:
+                return (1.0 / p.replace(0, np.nan)).astype(float)
+
+            def _value_edge(fair_odds: pd.Series, mkt_odds: pd.Series) -> pd.Series:
+                return (mkt_odds / fair_odds) - 1.0
+
+            tissue = df.copy()
+
+            tissue["T_Suit01"] = tissue["Suitability"].apply(_to01_suit_1to5)
+            tissue["T_Cond01_raw"] = tissue["Conditions_Score"].apply(_to01_0to10) if "Conditions_Score" in tissue.columns else np.nan
+            tissue["T_Spc01_raw"]  = tissue["SpeedConsistency_Score"].apply(_to01_0to10) if "SpeedConsistency_Score" in tissue.columns else np.nan
+
+            cond_n = pd.to_numeric(tissue.get("Conditions_Count", 0), errors="coerce").fillna(0)
+            spc_n  = pd.to_numeric(tissue.get("Speed_TotalRuns", 0), errors="coerce").fillna(0)
+
+            if prior_mode == "Race mean":
+                prior_s = float(np.nanmean(tissue["T_Suit01"])) if np.isfinite(np.nanmean(tissue["T_Suit01"])) else 0.5
+                prior_c = float(np.nanmean(tissue["T_Cond01_raw"])) if np.isfinite(np.nanmean(tissue["T_Cond01_raw"])) else 0.5
+                prior_k = float(np.nanmean(tissue["T_Spc01_raw"])) if np.isfinite(np.nanmean(tissue["T_Spc01_raw"])) else 0.5
+            else:
+                prior_s = prior_c = prior_k = 0.5
+
+            tissue["T_Cond01"] = [
+                _shrink(x, n, prior01=prior_c, k=k_shrk)
+                for x, n in zip(tissue["T_Cond01_raw"].tolist(), cond_n.tolist())
+            ]
+            tissue["T_Spc01"] = [
+                _shrink(x, n, prior01=prior_k, k=k_shrk)
+                for x, n in zip(tissue["T_Spc01_raw"].tolist(), spc_n.tolist())
+            ]
+
+            rC = cond_n / (cond_n + float(k_shrk))
+            rK = spc_n  / (spc_n  + float(k_shrk))
+
+            wS = float(w_suit)
+            wC = float(w_cond) * rC
+            wK = float(w_spc)  * rK
+            wSum = (wS + wC + wK).replace(0, np.nan)
+
+            tissue["T_wS"] = wS / wSum
+            tissue["T_wC"] = wC / wSum
+            tissue["T_wK"] = wK / wSum
+
+            tissue["T_Ability"] = (
+                tissue["T_wS"] * tissue["T_Suit01"].fillna(prior_s)
+                + tissue["T_wC"] * tissue["T_Cond01"].fillna(prior_c)
+                + tissue["T_wK"] * tissue["T_Spc01"].fillna(prior_k)
+            )
+
+            tissue["T_Prob_Fair"] = _softmax(tissue["T_Ability"], temperature=temp)
+            tissue["T_Odds_Fair"] = _odds(tissue["T_Prob_Fair"])
+
+            if use_overround:
+                tissue["T_Prob_Book"] = _apply_overround(tissue["T_Prob_Fair"], overround=target_or, shape=or_shape)
+            else:
+                tissue["T_Prob_Book"] = tissue["T_Prob_Fair"]
+
+            tissue["T_Odds_Book"] = _odds(tissue["T_Prob_Book"])
+
+            mkt_col = None
+            if show_value:
+                for cand in ["MarketOdds","Market Odds","Odds","BSP","SP","EarlyPrice","Price"]:
+                    if cand in tissue.columns:
+                        mkt_col = cand
+                        break
+
+            if show_value and mkt_col is not None:
+                tissue["MarketOdds"] = pd.to_numeric(tissue[mkt_col], errors="coerce")
+                tissue["Edge_Back"] = _value_edge(tissue["T_Odds_Fair"], tissue["MarketOdds"])
+            else:
+                tissue["MarketOdds"] = np.nan
+                tissue["Edge_Back"] = np.nan
+
+            tissue = tissue.sort_values(["T_Prob_Fair","T_Ability"], ascending=False).copy()
+            tissue["T_Rank"] = range(1, len(tissue)+1)
+
+            BACK_EDGE = 0.08
+            LAY_EDGE  = -0.10
+            tissue["Bet_Back"] = (tissue["T_Rank"] <= 3) & (tissue["Edge_Back"] >= BACK_EDGE)
+            tissue["Bet_Lay"]  = (tissue["T_Rank"] >= 4) & (tissue["Edge_Back"] <= LAY_EDGE)
+
+            out_cols = [
+                "T_Rank","Horse",
+                "Suitability","Conditions_Score","SpeedConsistency_Score",
+                "Conditions_Count","Speed_TotalRuns",
+                "T_wS","T_wC","T_wK",
+                "T_Ability",
+                "T_Prob_Fair","T_Odds_Fair",
+                "T_Prob_Book","T_Odds_Book",
+                "MarketOdds","Edge_Back",
+                "Bet_Back","Bet_Lay"
+            ]
+            out_cols = [c for c in out_cols if c in tissue.columns]
+            tissue_out = tissue[out_cols].copy()
+
+            for ccol in ["T_wS","T_wC","T_wK","T_Prob_Fair","T_Prob_Book"]:
+                if ccol in tissue_out.columns:
+                    tissue_out[ccol] = tissue_out[ccol].apply(lambda x: f"{float(x):.3f}" if pd.notna(x) else "")
+            for ccol in ["T_Odds_Fair","T_Odds_Book","MarketOdds"]:
+                if ccol in tissue_out.columns:
+                    tissue_out[ccol] = tissue_out[ccol].apply(lambda x: f"{float(x):.2f}" if pd.notna(x) else "")
+            if "Edge_Back" in tissue_out.columns:
+                tissue_out["Edge_Back"] = tissue_out["Edge_Back"].apply(lambda x: f"{float(x)*100:.1f}%" if pd.notna(x) else "")
+
+            st.dataframe(tissue_out, use_container_width=True)
 
             st.download_button(
                 "💾 Download Backbone + Diagnostics CSV",
