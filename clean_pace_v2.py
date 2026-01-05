@@ -72,13 +72,13 @@ def parse_run_style(rs_text: str, front_thr=1.6, prom_thr=2.4, mid_thr=3.0) -> p
         raise ValueError("Run Style: missing 'Horse' column.")
     df["Horse"] = df["Horse"].astype(str).str.strip()
 
-    lto5 = [c for c in [f"Lto{i}" for i in range(1, 6)] if c in df.columns]
-    lto10 = [c for c in [f"Lto{i}" for i in range(1, 11)] if c in df.columns]
+    lto5 = [c for c in [f"Lto{i}" for i in range(1,6)] if c in df.columns]
+    lto10 = [c for c in [f"Lto{i}" for i in range(1,11)] if c in df.columns]
     for c in lto10:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     if "RS_Avg" not in df.columns:
-        df["RS_Avg"] = df.apply(lambda r: _mean_ignore_zero([r[c] for c in lto5]), axis=1)
+        df["RS_Avg"]   = df.apply(lambda r: _mean_ignore_zero([r[c] for c in lto5]), axis=1)
     if "RS_Avg10" not in df.columns:
         df["RS_Avg10"] = df.apply(lambda r: _mean_ignore_zero([r[c] for c in lto10]), axis=1)
 
@@ -88,8 +88,8 @@ def parse_run_style(rs_text: str, front_thr=1.6, prom_thr=2.4, mid_thr=3.0) -> p
         df["Dr.%"] = df["Dr.%"].astype(str).str.replace("%", "", regex=False)
         df["Dr.%"] = pd.to_numeric(df["Dr.%"], errors="coerce")
 
-    keep = ["Horse"] + lto10 + ["RS_Avg", "RS_Avg10", "RS_Cat"] + \
-           [c for c in ["Mode 5", "Mode 10", "Total", "Mode All", "Draw", "Dr.%"] if c in df.columns]
+    keep = ["Horse"] + lto10 + ["RS_Avg","RS_Avg10","RS_Cat"] + \
+           [c for c in ["Mode 5","Mode 10","Total","Mode All","Draw","Dr.%"] if c in df.columns]
     return df[keep]
 
 # =========================
@@ -134,21 +134,20 @@ def _parse_wpt_value(val: str) -> Tuple[Optional[float], Optional[int], Optional
     if not m:
         return None, None, None, None
     w = int(m.group(1)); p = int(m.group(2)); t = int(m.group(3))
-    place = None if t == 0 else round((w + p) / t, 3)
+    place = None if t == 0 else round((w+p)/t, 3)
     return place, w, p, t
 
 def _parse_speed_series(s: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     nums = _numbers(s)
     if not nums:
         return None, None, None, None
-    last = nums[-1]
-    highest = max(nums)
-    avg3 = round(sum(nums[-3:]) / min(3, len(nums)), 1)
-    avgall = round(sum(nums) / len(nums), 1)
+    last = nums[-1]; highest = max(nums)
+    avg3 = round(sum(nums[-3:])/min(3, len(nums)), 1)
+    avgall = round(sum(nums)/len(nums), 1)
     return last, highest, avg3, avgall
 
 def parse_box45_single(raw: str) -> pd.DataFrame:
-    lines = [ln for ln in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n") if ln.strip()]
+    lines = [ln for ln in raw.replace("\r\n","\n").replace("\r","\n").split("\n") if ln.strip()]
     if not lines:
         return pd.DataFrame(columns=["Horse"])
     if lines[0].strip().lower().startswith("horse"):
@@ -161,18 +160,14 @@ def parse_box45_single(raw: str) -> pd.DataFrame:
             i += 1
         if i >= n:
             break
-        name = lines[i].strip()
-        i += 1
+        name = lines[i].strip(); i += 1
 
         values: List[str] = []
         while i < n and len(values) < 10:
             if _looks_like_name(lines, i):
                 break
-            values.append(lines[i].strip())
-            i += 1
-        if len(values) < 10:
-            values += [None] * (10 - len(values))
-
+            values.append(lines[i].strip()); i += 1
+        values += [None] * (10 - len(values)) if len(values) < 10 else []
         data = {"Horse": name}
         for key, val in zip(BOX_ORDER, values):
             data[key] = val
@@ -198,33 +193,114 @@ def build_speed_conditions(df_raw: pd.DataFrame) -> pd.DataFrame:
         runs_list_str.append(", ".join([str(int(x)) if float(x).is_integer() else str(x) for x in nums]) if nums else "")
 
         last, high, avg3, avgall = _parse_speed_series(s)
-        last_list.append(last)
-        high_list.append(high)
-        avg3_list.append(avg3)
-        all_list.append(avgall)
-        keyavg_list.append(None if (last is None or high is None or avg3 is None) else round((last + high + avg3) / 3, 1))
+        last_list.append(last); high_list.append(high)
+        avg3_list.append(avg3);  all_list.append(avgall)
+        keyavg_list.append(None if (last is None or high is None or avg3 is None) else round((last+high+avg3)/3, 1))
 
     out["SpeedRunsList"] = runs_list_str
     out["LastRace"] = last_list
-    out["Highest"] = high_list
-    out["Avg3"] = avg3_list
-    out["AvgAll"] = all_list
+    out["Highest"]  = high_list
+    out["Avg3"]     = avg3_list
+    out["AvgAll"]   = all_list
     out["KeySpeedAvg"] = keyavg_list
 
     # keep totals per condition too
-    for col in ["crs", "dist", "lhrh", "going", "cls", "runpm1", "trackstyle"]:
+    for col in ["crs","dist","lhrh","going","cls","runpm1","trackstyle"]:
         if col in out.columns:
             parsed = [_parse_wpt_value(v) for v in out[col].fillna("")]
             out[f"{col}_place"] = [p[0] for p in parsed]
             out[f"{col}_total"] = [p[3] for p in parsed]
 
     keep = ["Horse",
-            "SpeedRunsRaw", "SpeedRunsList",
-            "LastRace", "Highest", "Avg3", "AvgAll", "KeySpeedAvg",
-            "crs_place", "dist_place", "lhrh_place", "going_place", "cls_place", "runpm1_place", "trackstyle_place",
-            "crs_total", "dist_total", "lhrh_total", "going_total", "cls_total", "runpm1_total", "trackstyle_total"]
+            "SpeedRunsRaw","SpeedRunsList",
+            "LastRace","Highest","Avg3","AvgAll","KeySpeedAvg",
+            "crs_place","dist_place","lhrh_place","going_place","cls_place","runpm1_place","trackstyle_place",
+            "crs_total","dist_total","lhrh_total","going_total","cls_total","runpm1_total","trackstyle_total"]
     keep = [c for c in keep if c in out.columns]
     return out[keep]
+
+# =========================
+# NEW: Betfair Exchange prices parser (Back all first price)
+# =========================
+def parse_betfair_backall(raw: str) -> pd.DataFrame:
+    """
+    Parse a Betfair Exchange 'Back all' ladder paste and extract:
+      Horse name + best 'Back all' price (the first price shown after jockey line).
+    Returns: DataFrame with columns ["Horse","MarketOdds"].
+    """
+    if not raw or not str(raw).strip():
+        return pd.DataFrame(columns=["Horse", "MarketOdds"])
+
+    lines = [ln.strip() for ln in str(raw).replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    lines = [ln for ln in lines if ln.strip()]
+
+    def looks_like_horse_name(s: str) -> bool:
+        s = (s or "").strip()
+        if not s:
+            return False
+        low = s.lower()
+        bad = {"back all", "lay all", "bsp", "sp", "matched", "unmatched", "back", "lay"}
+        if low in bad:
+            return False
+        # horse names: no digits, no €, no commas, no parentheses
+        if "€" in s:
+            return False
+        if "," in s:
+            return False
+        if re.search(r"\d", s):
+            return False
+        if re.search(r"[\(\)]", s):
+            return False
+        return len(s) >= 3
+
+    def looks_like_jockey_line(s: str) -> bool:
+        s = (s or "").strip()
+        if not s:
+            return False
+        if "€" in s:
+            return False
+        # allow (5) claims; disallow other digit patterns
+        if re.search(r"\d", s) and not re.search(r"\(\s*\d+\s*\)", s):
+            return False
+        return bool(re.search(r"[A-Za-z]", s))
+
+    def first_price_ahead(start_idx: int, lookahead: int = 14) -> Optional[float]:
+        for j in range(start_idx, min(len(lines), start_idx + lookahead)):
+            txt = lines[j]
+            if "%" in txt:
+                continue
+            m = re.search(r"\b(\d+(?:\.\d+)?)\b", txt)
+            if m:
+                try:
+                    val = float(m.group(1))
+                    if val >= 1.01:
+                        return val
+                except Exception:
+                    pass
+        return None
+
+    recs = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if looks_like_horse_name(lines[i]):
+            horse = lines[i].strip()
+            jline = lines[i + 1].strip() if i + 1 < n else ""
+            if looks_like_jockey_line(jline):
+                price = first_price_ahead(i + 2, lookahead=14)
+                if price is not None:
+                    recs.append({"Horse": horse, "MarketOdds": price})
+                    i += 2
+                    continue
+        i += 1
+
+    df = pd.DataFrame(recs)
+    if df.empty:
+        return pd.DataFrame(columns=["Horse", "MarketOdds"])
+
+    df["Horse"] = df["Horse"].astype(str).str.strip()
+    df = df.drop_duplicates(subset=["Horse"], keep="first").reset_index(drop=True)
+    return df
 
 # =========================
 # Pace engine + Suitability (backbone unchanged)
@@ -270,12 +346,10 @@ def _dist_band(d: float) -> str:
     return "route"
 
 def _lcp_from_dvp(style_cat: Optional[str], dvp: Optional[float], s: Settings) -> str:
-    if style_cat not in ("Front", "Prominent") or dvp is None:
+    if style_cat not in ("Front","Prominent") or dvp is None:
         return "N/A"
-    if dvp >= s.lcp_high:
-        return "High"
-    if dvp >= s.lcp_question_low:
-        return "Questionable"
+    if dvp >= s.lcp_high: return "High"
+    if dvp >= s.lcp_question_low: return "Questionable"
     return "Unlikely"
 
 def should_use_hybrid(distance_f: float,
@@ -322,24 +396,23 @@ def late_strong_warn_hybrid_only_6f(distance_f: float,
         return False
     if FH >= 3:
         return False
-
     if 0.55 <= c <= 0.85 and e >= 3.2:
         return True
     return False
 
-def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str], Dict[str, object]]:
+def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float,Dict[str,str],Dict[str,object]]:
     debug = {"rules_applied": []}
     if not rows:
         return "N/A", 0.0, {}, {"error": "no rows"}
 
-    d = pd.DataFrame([{"horse": r.horse, "style": r.style_cat, "dvp": r.dvp, "lcp": r.lcp} for r in rows])
+    d = pd.DataFrame([{"horse":r.horse, "style":r.style_cat, "dvp":r.dvp, "lcp":r.lcp} for r in rows])
 
-    front_all = d[d["style"] == "Front"]
-    prom_all = d[d["style"] == "Prominent"]
-    front_high = d[(d["style"] == "Front") & (d["lcp"] == "High")]
-    prom_high = d[(d["style"] == "Prominent") & (d["lcp"] == "High")]
-    front_q = d[(d["style"] == "Front") & (d["lcp"] == "Questionable")]
-    prom_q = d[(d["style"] == "Prominent") & (d["lcp"] == "Questionable")]
+    front_all = d[d["style"]=="Front"]
+    prom_all  = d[d["style"]=="Prominent"]
+    front_high = d[(d["style"]=="Front") & (d["lcp"]=="High")]
+    prom_high  = d[(d["style"]=="Prominent") & (d["lcp"]=="High")]
+    front_q    = d[(d["style"]=="Front") & (d["lcp"]=="Questionable")]
+    prom_q     = d[(d["style"]=="Prominent") & (d["lcp"]=="Questionable")]
 
     n_front = len(front_all)
     n_fh = len(front_high)
@@ -348,7 +421,7 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, floa
     n_pq = len(prom_q)
 
     W_FH, W_PH, W_FQ, W_PQ = 2.0, 0.8, 0.5, 0.2
-    energy = (W_FH * n_fh) + (W_PH * n_ph) + (W_FQ * n_fq) + (W_PQ * n_pq)
+    energy = (W_FH*n_fh) + (W_PH*n_ph) + (W_FQ*n_fq) + (W_PQ*n_pq)
 
     band = _dist_band(s.distance_f)
 
@@ -359,22 +432,22 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, floa
         if n_fh >= 2:
             scenario, conf = "Strong", 0.65
             debug["rules_applied"].append("≥2 High Front → Strong")
-        elif (n_fh + n_ph) >= 3 and energy >= 3.2:
+        elif (n_fh+n_ph)>=3 and energy>=3.2:
             scenario, conf = "Strong", 0.65
             debug["rules_applied"].append("≥3 High early & energy≥3.2 → Strong")
         elif energy >= 3.2:
             scenario, conf = "Strong", 0.60
             debug["rules_applied"].append("energy≥3.2 → Strong")
-        elif (n_fh + n_ph) >= 2:
+        elif (n_fh+n_ph) >= 2:
             scenario, conf = "Even", 0.60
             debug["rules_applied"].append("≥2 High early → Even")
-        elif (n_fh + n_ph) == 1 and (n_fq + n_pq) >= 1:
+        elif (n_fh+n_ph) == 1 and (n_fq+n_pq) >= 1:
             scenario, conf = "Even", 0.55
             debug["rules_applied"].append("1 High + Questionables → Even")
-        elif (n_fh + n_ph) == 1:
+        elif (n_fh+n_ph) == 1:
             scenario, conf = "Even", 0.60
             debug["rules_applied"].append("1 High → Even")
-        elif (n_fq + n_pq) >= 1:
+        elif (n_fq+n_pq) >= 1:
             scenario, conf = "Slow", 0.60
             debug["rules_applied"].append("Only Questionables → Slow")
         else:
@@ -388,8 +461,8 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, floa
                     allow_strong = float(prom_high["dvp"].mean()) >= -1.0
                 except Exception:
                     allow_strong = False
-            if not allow_strong and scenario in ("Strong", "Very Strong"):
-                scenario, conf = "Even", min(conf, 0.60)
+            if not allow_strong and scenario in ("Strong","Very Strong"):
+                scenario, conf = "Even", min(conf,0.60)
                 debug["rules_applied"].append("No-front cap → Even")
 
         if n_fh == 1 and n_ph <= 1:
@@ -397,8 +470,8 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, floa
                 lf = float(front_high["dvp"].iloc[0])
             except Exception:
                 lf = None
-            if (lf is not None) and (lf >= 2.0) and scenario in ("Strong", "Very Strong"):
-                scenario, conf = "Even", max(conf, 0.65)
+            if (lf is not None) and (lf >= 2.0) and scenario in ("Strong","Very Strong"):
+                scenario, conf = "Even", max(conf,0.65)
                 debug["rules_applied"].append("Dominant-front cap → Even")
 
         if n_fh == 1:
@@ -407,11 +480,11 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, floa
             except Exception:
                 lf2 = None
             if (lf2 is None) or (lf2 <= 1.0):
-                if scenario in ("Strong", "Very Strong"):
-                    scenario, conf = "Even", max(conf, 0.60)
+                if scenario in ("Strong","Very Strong"):
+                    scenario, conf = "Even", max(conf,0.60)
                     debug["rules_applied"].append("Single-front cap (≤+1) → Even")
             if (lf2 is not None) and (lf2 <= -2.0) and (n_ph <= 1) and scenario == "Even":
-                scenario, conf = "Slow", max(conf, 0.65)
+                scenario, conf = "Slow", max(conf,0.65)
                 debug["rules_applied"].append("Single-front below par → Slow")
 
         if n_front == 1:
@@ -420,20 +493,20 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, floa
             except Exception:
                 anyf = None
             if (anyf is not None) and (anyf <= -8.0):
-                idx = max(0, ["Slow", "Even", "Strong", "Very Strong"].index(scenario) - 1)
-                scenario = ["Slow", "Even", "Strong", "Very Strong"][idx]
-                conf = max(conf, 0.65)
+                idx = max(0, ["Slow","Even","Strong","Very Strong"].index(scenario)-1)
+                scenario = ["Slow","Even","Strong","Very Strong"][idx]
+                conf = max(conf,0.65)
                 debug["rules_applied"].append("Weak solo leader → downgrade")
 
-        if band in ("5f", "6f") and n_fh == 1 and n_ph <= 2:
+        if band in ("5f","6f") and n_fh == 1 and n_ph <= 2:
             try:
                 lf = float(front_high["dvp"].iloc[0])
             except Exception:
                 lf = None
-            dvp_ok = -0.5 if band == "5f" else -1.0
-            energy_cap = 4.0 if band == "5f" else 3.6
-            if (lf is not None) and (lf >= dvp_ok) and (energy < energy_cap) and scenario in ("Strong", "Very Strong"):
-                scenario, conf = "Even", max(conf, 0.65)
+            dvp_ok = -0.5 if band=="5f" else -1.0
+            energy_cap = 4.0 if band=="5f" else 3.6
+            if (lf is not None) and (lf >= dvp_ok) and (energy < energy_cap) and scenario in ("Strong","Very Strong"):
+                scenario, conf = "Even", max(conf,0.65)
                 debug["rules_applied"].append("Sprint cap: Strong→Even")
 
         if band == "route" and scenario == "Even" and n_fh == 1 and n_ph <= 1:
@@ -446,10 +519,10 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, floa
                 debug["rules_applied"].append("Front-controlled tag")
 
     debug.update({
-        "counts": {
-            "Front_all": int(n_front),
-            "Front_High": int(n_fh),
-            "Prominent_High": int(n_ph)
+        "counts":{
+            "Front_all":int(n_front),
+            "Front_High":int(n_fh),
+            "Prominent_High":int(n_ph)
         },
         "early_energy": float(energy),
         "distance_band": band
@@ -458,10 +531,10 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str, floa
     return scenario, conf, lcp_map, debug
 
 # =========================
-# Diagnostics (NEW, separate; no effect on Suitability)
+# Diagnostics (separate; no effect on Suitability)
 # =========================
-COND_COLS = ["dist_place", "cls_place", "runpm1_place", "trackstyle_place", "crs_place", "lhrh_place", "going_place"]
-COND_TOTAL_COLS = ["dist_total", "cls_total", "runpm1_total", "trackstyle_total", "crs_total", "lhrh_total", "going_total"]
+COND_COLS = ["dist_place","cls_place","runpm1_place","trackstyle_place","crs_place","lhrh_place","going_place"]
+COND_TOTAL_COLS = ["dist_total","cls_total","runpm1_total","trackstyle_total","crs_total","lhrh_total","going_total"]
 
 def conditions_score_from_mean(mean_val: Optional[float], count: int, one_run_placed: bool) -> Optional[float]:
     if mean_val is None or (isinstance(mean_val, float) and np.isnan(mean_val)):
@@ -502,6 +575,7 @@ def consistency_score_from_ratio(r: Optional[float], total_runs: int, runs_at_pa
 # =========================
 TAB_MAIN, TAB_PACE = st.tabs(["All Inputs (2 boxes)", "Pace & Backbone + Diagnostics (from Combined CSV)"])
 
+# ---------- TAB 1: Inputs ----------
 with TAB_MAIN:
     st.subheader("Box A — Run Style ONLY")
     st.caption("Paste ONLY the Run Style Figure table. (No Official Ratings, no Race Class section.)")
@@ -511,30 +585,49 @@ with TAB_MAIN:
     st.caption("Paste the single block starting 'Horse Win % ...' that includes Speed Series and (W/P/T) lines.")
     boxB = st.text_area("Box B paste", height=320, key="boxB")
 
-    col_thr = st.columns(3)
-    with col_thr[0]: front_thr = st.number_input("Front <", value=1.6, step=0.1)
-    with col_thr[1]: prom_thr = st.number_input("Prominent <", value=2.4, step=0.1)
-    with col_thr[2]: mid_thr = st.number_input("Mid <", value=3.0, step=0.1)
+    # NEW: Betfair prices (optional)
+    st.subheader("Box C — Betfair Exchange Prices (optional)")
+    st.caption("Paste the Betfair Exchange market block. We extract the first price in the 'Back all' column per horse and save it as MarketOdds.")
+    boxC = st.text_area("Box C paste (Betfair)", height=260, key="boxC")
 
-    if st.button("🚀 Process All (A + B)"):
+    col_thr = st.columns(3)
+    with col_thr[0]:
+        front_thr = st.number_input("Front <", value=1.6, step=0.1)
+    with col_thr[1]:
+        prom_thr  = st.number_input("Prominent <", value=2.4, step=0.1)
+    with col_thr[2]:
+        mid_thr   = st.number_input("Mid <", value=3.0, step=0.1)
+
+    if st.button("🚀 Process All (A + B + optional C)"):
         try:
             rs_df = parse_run_style(boxA, front_thr, prom_thr, mid_thr)
+
             b_raw = parse_box45_single(boxB) if boxB.strip() else pd.DataFrame(columns=["Horse"])
             b_df = build_speed_conditions(b_raw) if not b_raw.empty else pd.DataFrame(columns=["Horse"])
 
-            for d in (rs_df, b_df):
+            bf_df = parse_betfair_backall(boxC) if boxC.strip() else pd.DataFrame(columns=["Horse","MarketOdds"])
+
+            for d in (rs_df, b_df, bf_df):
                 if "Horse" in d.columns:
                     d["Horse"] = d["Horse"].astype(str).str.strip()
 
             merged = rs_df.merge(b_df, on="Horse", how="outer")
+            if not bf_df.empty:
+                merged = merged.merge(bf_df[["Horse","MarketOdds"]], on="Horse", how="left")
 
-            st.success("Parsed ✓ (OR + Race Class removed)")
+            st.success("Parsed ✓ (Run Style + Speed/Conditions + optional Betfair prices)")
 
             a, b = st.tabs(["Run Style ✓", "Speed & Conditions (Box B) ✓"])
-            with a: st.dataframe(rs_df, use_container_width=True)
-            with b: st.dataframe(b_df, use_container_width=True)
+            with a:
+                st.dataframe(rs_df, use_container_width=True)
+            with b:
+                st.dataframe(b_df, use_container_width=True)
 
-            st.markdown("## 🧩 Combined Output (A + B)")
+            if not bf_df.empty:
+                st.markdown("### Betfair Prices ✓ (parsed)")
+                st.dataframe(bf_df, use_container_width=True)
+
+            st.markdown("## 🧩 Combined Output (A + B + optional Betfair)")
             st.dataframe(merged, use_container_width=True)
             st.download_button(
                 "💾 Download Combined CSV",
@@ -545,6 +638,7 @@ with TAB_MAIN:
         except Exception as e:
             st.error(f"Failed: {e}")
 
+# ---------- TAB 2: Backbone + Diagnostics ----------
 with TAB_PACE:
     st.subheader("Upload 🧩 Combined Output (A + B) CSV")
     upl = st.file_uploader("Combined CSV", type=["csv"], key="pace_csv")
@@ -552,9 +646,9 @@ with TAB_PACE:
     c = st.columns(5)
     class_par = c[0].number_input("Class Par", value=77.0, step=0.5)
     distance_f = c[1].number_input("Distance (f)", value=6.0, step=0.5, min_value=5.0)
-    wp_even = c[2].slider("wp (Even/Uncertain)", 0.3, 0.8, 0.50, 0.05)
-    wp_conf = c[3].slider("wp (Predictable Slow/Very Strong)", 0.3, 0.8, 0.65, 0.05)
-    clip5 = c[4].checkbox("Clip Suitability to 1–5", value=True)
+    wp_even    = c[2].slider("wp (Even/Uncertain)", 0.3, 0.8, 0.50, 0.05)
+    wp_conf    = c[3].slider("wp (Predictable Slow/Very Strong)", 0.3, 0.8, 0.65, 0.05)
+    clip5      = c[4].checkbox("Clip Suitability to 1–5", value=True)
 
     pace_override = st.selectbox(
         "Pace override (optional)",
@@ -567,13 +661,12 @@ with TAB_PACE:
         try:
             df = pd.read_csv(upl)
             if "Horse" not in df.columns:
-                st.error("Missing column in CSV: Horse")
-                st.stop()
+                st.error("Missing column in CSV: Horse"); st.stop()
             df["Horse"] = df["Horse"].astype(str).str.strip()
 
             adjspeed_aliases = [
-                "AdjSpeed", "KeySpeedAvg", "Key Speed Factors Average",
-                "Key_Speed_Factors_Average", "Adjusted Speed", "Adjusted_Speed", "KeySpeed"
+                "AdjSpeed","KeySpeedAvg","Key Speed Factors Average",
+                "Key_Speed_Factors_Average","Adjusted Speed","Adjusted_Speed","KeySpeed"
             ]
             col_adjspeed = map_column(df, adjspeed_aliases)
             if col_adjspeed is None:
@@ -584,7 +677,7 @@ with TAB_PACE:
             else:
                 df["AdjSpeed"] = pd.to_numeric(df["AdjSpeed"], errors="coerce")
 
-            rsavg_aliases = ["RS_Avg", "RS Avg", "RSAVG", "RS_Avg5", "RS_Avg (5)", "RS5_Avg", "RS(5)Avg"]
+            rsavg_aliases = ["RS_Avg","RS Avg","RSAVG","RS_Avg5","RS_Avg (5)","RS5_Avg","RS(5)Avg"]
             col_rsavg = map_column(df, rsavg_aliases)
             if col_rsavg is None:
                 st.error("Missing RS_Avg (avg of last 5 run styles). Expected one of: " + ", ".join(rsavg_aliases))
@@ -594,7 +687,7 @@ with TAB_PACE:
             else:
                 df["RS_Avg"] = pd.to_numeric(df["RS_Avg"], errors="coerce")
 
-            rs10_aliases = ["RS_Avg10", "RS Avg 10", "RSAVG10", "RS(10)Avg", "RS10_Avg"]
+            rs10_aliases = ["RS_Avg10","RS Avg 10","RSAVG10","RS(10)Avg","RS10_Avg"]
             col_rs10 = map_column(df, rs10_aliases)
             if col_rs10 and col_rs10 != "RS_Avg10":
                 df["RS_Avg10"] = pd.to_numeric(df[col_rs10], errors="coerce")
@@ -651,11 +744,9 @@ with TAB_PACE:
                 key = "Even" if scenario.startswith("Even") else scenario
                 pacefit_map = PACEFIT.get(key, PACEFIT["Even"])
 
-            wp = s.wp_confident if (scenario in ("Slow", "Very Strong") and conf_numeric >= 0.65) else s.wp_even
-            if band == "5f":
-                wp = max(wp, 0.60)
-            elif band == "6f":
-                wp = max(wp, 0.55)
+            wp = s.wp_confident if (scenario in ("Slow","Very Strong") and conf_numeric >= 0.65) else s.wp_even
+            if band == "5f": wp = max(wp, 0.60)
+            elif band == "6f": wp = max(wp, 0.55)
             ws = 1 - wp
 
             def _speedfit(v):
@@ -668,17 +759,18 @@ with TAB_PACE:
                 return 1.0
 
             df["SpeedFit"] = df["ΔvsPar"].apply(_speedfit)
+
             df["PaceFit"] = df["Style"].map(pacefit_map).fillna(3.0)
 
-            df["PaceFit_Slow"] = df["Style"].map(slow_map).fillna(3.0)
-            df["PaceFit_Even"] = df["Style"].map(even_map).fillna(3.0)
+            df["PaceFit_Slow"]   = df["Style"].map(slow_map).fillna(3.0)
+            df["PaceFit_Even"]   = df["Style"].map(even_map).fillna(3.0)
             df["PaceFit_Strong"] = df["Style"].map(strong_map).fillna(3.0)
 
-            df["Suitability_Slow"] = df["PaceFit_Slow"] * wp + df["SpeedFit"] * ws
-            df["Suitability_Even"] = df["PaceFit_Even"] * wp + df["SpeedFit"] * ws
+            df["Suitability_Slow"]   = df["PaceFit_Slow"]   * wp + df["SpeedFit"] * ws
+            df["Suitability_Even"]   = df["PaceFit_Even"]   * wp + df["SpeedFit"] * ws
             df["Suitability_Strong"] = df["PaceFit_Strong"] * wp + df["SpeedFit"] * ws
 
-            df["Suitability_Base_Even"] = df["Suitability_Even"]
+            df["Suitability_Base_Even"]   = df["Suitability_Even"]
             df["Suitability_Base_Strong"] = df["Suitability_Strong"]
 
             df["Suitability_Base"] = df["PaceFit"] * wp + df["SpeedFit"] * ws
@@ -723,7 +815,10 @@ with TAB_PACE:
                 tmp["LateStrongProfile"] = (tmp["Suitability_Slow"] - tmp["Suitability_Strong"])
                 tmp = tmp[tmp["Style"].isin(["Front", "Prominent", "Mid"])].copy()
                 tmp = tmp[(tmp["Suitability_Slow"] >= 3.6) & (tmp["Suitability_Even"] >= 3.1)].copy()
-                tmp = tmp.sort_values(["LateStrongProfile", "Suitability_Slow", "Suitability_Base"], ascending=False)
+                tmp = tmp.sort_values(
+                    ["LateStrongProfile", "Suitability_Slow", "Suitability_Base"],
+                    ascending=False
+                )
                 watch = tmp[tmp["LateStrongProfile"] >= 0.6].head(2)["Horse"].tolist()
                 if not watch and not tmp.empty:
                     watch = tmp.head(1)["Horse"].tolist()
@@ -751,7 +846,7 @@ with TAB_PACE:
                     flags = []
                     for _, r in df.iterrows():
                         flag = False
-                        for base in ["crs", "dist", "lhrh", "going", "cls", "runpm1", "trackstyle"]:
+                        for base in ["crs","dist","lhrh","going","cls","runpm1","trackstyle"]:
                             pcol = f"{base}_place"
                             tcol = f"{base}_total"
                             if pcol in df.columns and tcol in df.columns:
@@ -776,7 +871,7 @@ with TAB_PACE:
                 df["Conditions_Score"] = None
 
             sr_col = None
-            for cand in ["SpeedRunsRaw", "speed_series", "SpeedRunsList"]:
+            for cand in ["SpeedRunsRaw","speed_series","SpeedRunsList"]:
                 if cand in df.columns:
                     sr_col = cand
                     break
@@ -791,9 +886,9 @@ with TAB_PACE:
                     atpar.append(n_par)
                     pct.append((n_par / n_total) if n_total > 0 else np.nan)
             else:
-                totals = [0] * len(df)
-                atpar = [0] * len(df)
-                pct = [np.nan] * len(df)
+                totals = [0]*len(df)
+                atpar = [0]*len(df)
+                pct = [np.nan]*len(df)
 
             df["Speed_TotalRuns"] = totals
             df["Speed_RunsAtPar"] = atpar
@@ -817,9 +912,9 @@ with TAB_PACE:
             with st.expander("Why this pace? (Reason used)", expanded=True):
                 counts = debug.get("counts", {})
                 st.markdown(
-                    f"- **Front (High):** {counts.get('Front_High', 0)} &nbsp;&nbsp; "
-                    f"**Prominent (High):** {counts.get('Prominent_High', 0)}  \n"
-                    f"- **Early energy:** {debug.get('early_energy', 0.0):.2f}"
+                    f"- **Front (High):** {counts.get('Front_High',0)} &nbsp;&nbsp; "
+                    f"**Prominent (High):** {counts.get('Prominent_High',0)}  \n"
+                    f"- **Early energy:** {debug.get('early_energy',0.0):.2f}"
                 )
                 rules = debug.get("rules_applied", [])
                 if rules:
@@ -837,15 +932,15 @@ with TAB_PACE:
 
             st.markdown("## Backbone — Pace/Speed Suitability (unchanged)")
             show_cols = [
-                "Horse", "RS_Avg", "RS_Avg10", "Style", "AdjSpeed", "ΔvsPar", "LCP",
-                "PaceFit", "SpeedFit", "wp", "ws",
-                "Suitability_Slow", "Suitability_Even", "Suitability_Strong",
-                "Suitability_Base", "Suitability",
-                "Scenario", "Confidence"
+                "Horse","RS_Avg","RS_Avg10","Style","AdjSpeed","ΔvsPar","LCP",
+                "PaceFit","SpeedFit","wp","ws",
+                "Suitability_Slow","Suitability_Even","Suitability_Strong",
+                "Suitability_Base","Suitability",
+                "Scenario","Confidence"
             ]
             show_cols = [c for c in show_cols if c in df.columns]
             out_backbone = df[show_cols].sort_values(
-                ["Suitability", "Suitability_Base", "Suitability_Even", "SpeedFit"],
+                ["Suitability","Suitability_Base","Suitability_Even","SpeedFit"],
                 ascending=False
             )
             st.dataframe(out_backbone, use_container_width=True)
@@ -853,11 +948,11 @@ with TAB_PACE:
             st.markdown("## Diagnostics — Supporting Tables (Box B parrot + checks)")
 
             st.markdown("### 1) Conditions — Raw Place Data (parroted)")
-            raw_cond_cols = ["Horse"] + [c for c in ["crs_place", "dist_place", "lhrh_place", "going_place", "cls_place", "runpm1_place", "trackstyle_place"] if c in df.columns]
+            raw_cond_cols = ["Horse"] + [c for c in ["crs_place","dist_place","lhrh_place","going_place","cls_place","runpm1_place","trackstyle_place"] if c in df.columns]
             st.dataframe(df[raw_cond_cols], use_container_width=True)
 
             st.markdown("### 2) Conditions — Score Breakdown")
-            cond_break_cols = ["Horse", "Conditions_Count", "Conditions_Mean", "Conditions_Score"]
+            cond_break_cols = ["Horse","Conditions_Count","Conditions_Mean","Conditions_Score"]
             cond_break_cols = [c for c in cond_break_cols if c in df.columns]
             cond_break = df[cond_break_cols].copy()
             st.dataframe(cond_break, use_container_width=True)
@@ -869,12 +964,12 @@ with TAB_PACE:
                 st.info("No speed series column found in the combined CSV (expected SpeedRunsRaw / speed_series / SpeedRunsList).")
 
             st.markdown("### 4) Speed Consistency — Breakdown vs Par")
-            cons = df[["Horse", "Speed_TotalRuns", "Speed_RunsAtPar", "Speed_ParPct", "SpeedConsistency_Score"]].copy()
+            cons = df[["Horse","Speed_TotalRuns","Speed_RunsAtPar","Speed_ParPct","SpeedConsistency_Score"]].copy()
             cons["Speed_ParPct"] = cons["Speed_ParPct"].apply(lambda x: f"{x*100:.0f}%" if pd.notna(x) else "")
             st.dataframe(cons, use_container_width=True)
 
             st.markdown("### 5) Overlay — Backbone + Diagnostics (read-only)")
-            overlay_cols = ["Horse", "Suitability", "Suitability_Even", "Suitability_Strong", "Suitability_Slow", "Conditions_Score", "SpeedConsistency_Score"]
+            overlay_cols = ["Horse","Suitability","Suitability_Even","Suitability_Strong","Suitability_Slow","Conditions_Score","SpeedConsistency_Score","MarketOdds"]
             overlay_cols = [c for c in overlay_cols if c in df.columns]
             st.dataframe(df[overlay_cols].sort_values(["Suitability"], ascending=False), use_container_width=True)
 
@@ -887,15 +982,15 @@ with TAB_PACE:
                 tc = st.columns(6)
                 w_suit = tc[0].slider("Weight: Suitability", 0.0, 1.0, 0.50, 0.05)
                 w_cond = tc[1].slider("Weight: Conditions", 0.0, 1.0, 0.20, 0.05)
-                w_spc = tc[2].slider("Weight: SpeedConsistency", 0.0, 1.0, 0.30, 0.05)
-                temp = tc[3].slider("Softmax temperature (lower = stronger favs)", 0.05, 0.50, 0.18, 0.01)
+                w_spc  = tc[2].slider("Weight: SpeedConsistency", 0.0, 1.0, 0.30, 0.05)
+                temp   = tc[3].slider("Softmax temperature (lower = stronger favs)", 0.05, 0.50, 0.18, 0.01)
                 k_shrk = tc[4].slider("Evidence shrink strength (k)", 1.0, 12.0, 6.0, 0.5)
                 prior_mode = tc[5].selectbox("Missing-data prior", ["Neutral (0.50)", "Race mean"], index=1)
 
                 oc = st.columns(4)
                 use_overround = oc[0].checkbox("Apply overround (book %)", value=False)
                 target_or = oc[1].slider("Target overround", 1.00, 1.30, 1.08, 0.01)
-                or_shape = oc[2].slider("Fav/longshot shape", 0.00, 0.60, 0.15, 0.05)
+                or_shape  = oc[2].slider("Fav/longshot shape", 0.00, 0.60, 0.15, 0.05)
                 show_value = oc[3].checkbox("Show value vs Market Odds (if column exists)", value=True)
 
             def _clip01(x: float) -> float:
@@ -948,10 +1043,10 @@ with TAB_PACE:
 
             tissue["T_Suit01"] = tissue["Suitability"].apply(_to01_suit_1to5)
             tissue["T_Cond01_raw"] = tissue["Conditions_Score"].apply(_to01_0to10) if "Conditions_Score" in tissue.columns else np.nan
-            tissue["T_Spc01_raw"] = tissue["SpeedConsistency_Score"].apply(_to01_0to10) if "SpeedConsistency_Score" in tissue.columns else np.nan
+            tissue["T_Spc01_raw"]  = tissue["SpeedConsistency_Score"].apply(_to01_0to10) if "SpeedConsistency_Score" in tissue.columns else np.nan
 
             cond_n = pd.to_numeric(tissue.get("Conditions_Count", 0), errors="coerce").fillna(0)
-            spc_n = pd.to_numeric(tissue.get("Speed_TotalRuns", 0), errors="coerce").fillna(0)
+            spc_n  = pd.to_numeric(tissue.get("Speed_TotalRuns", 0), errors="coerce").fillna(0)
 
             if prior_mode == "Race mean":
                 prior_s = float(np.nanmean(tissue["T_Suit01"])) if np.isfinite(np.nanmean(tissue["T_Suit01"])) else 0.5
@@ -970,11 +1065,11 @@ with TAB_PACE:
             ]
 
             rC = cond_n / (cond_n + float(k_shrk))
-            rK = spc_n / (spc_n + float(k_shrk))
+            rK = spc_n  / (spc_n  + float(k_shrk))
 
             wS = float(w_suit)
             wC = float(w_cond) * rC
-            wK = float(w_spc) * rK
+            wK = float(w_spc)  * rK
             wSum = (wS + wC + wK).replace(0, np.nan)
 
             tissue["T_wS"] = wS / wSum
@@ -999,7 +1094,7 @@ with TAB_PACE:
 
             mkt_col = None
             if show_value:
-                for cand in ["MarketOdds", "Market Odds", "Odds", "BSP", "SP", "EarlyPrice", "Price"]:
+                for cand in ["MarketOdds","Market Odds","Odds","BSP","SP","EarlyPrice","Price"]:
                     if cand in tissue.columns:
                         mkt_col = cand
                         break
@@ -1011,36 +1106,36 @@ with TAB_PACE:
                 tissue["MarketOdds"] = np.nan
                 tissue["Edge_Back"] = np.nan
 
-            tissue = tissue.sort_values(["T_Prob_Fair", "T_Ability"], ascending=False).copy()
-            tissue["T_Rank"] = range(1, len(tissue) + 1)
+            tissue = tissue.sort_values(["T_Prob_Fair","T_Ability"], ascending=False).copy()
+            tissue["T_Rank"] = range(1, len(tissue)+1)
 
             BACK_EDGE = 0.08
-            LAY_EDGE = -0.10
+            LAY_EDGE  = -0.10
             tissue["Bet_Back"] = (tissue["T_Rank"] <= 3) & (tissue["Edge_Back"] >= BACK_EDGE)
-            tissue["Bet_Lay"] = (tissue["T_Rank"] >= 4) & (tissue["Edge_Back"] <= LAY_EDGE)
+            tissue["Bet_Lay"]  = (tissue["T_Rank"] >= 4) & (tissue["Edge_Back"] <= LAY_EDGE)
 
             out_cols = [
-                "T_Rank", "Horse",
-                "Suitability", "Conditions_Score", "SpeedConsistency_Score",
-                "Conditions_Count", "Speed_TotalRuns",
-                "T_wS", "T_wC", "T_wK",
+                "T_Rank","Horse",
+                "Suitability","Conditions_Score","SpeedConsistency_Score",
+                "Conditions_Count","Speed_TotalRuns",
+                "T_wS","T_wC","T_wK",
                 "T_Ability",
-                "T_Prob_Fair", "T_Odds_Fair",
-                "T_Prob_Book", "T_Odds_Book",
-                "MarketOdds", "Edge_Back",
-                "Bet_Back", "Bet_Lay"
+                "T_Prob_Fair","T_Odds_Fair",
+                "T_Prob_Book","T_Odds_Book",
+                "MarketOdds","Edge_Back",
+                "Bet_Back","Bet_Lay"
             ]
             out_cols = [c for c in out_cols if c in tissue.columns]
             tissue_out = tissue[out_cols].copy()
 
-            for ccol in ["T_wS", "T_wC", "T_wK", "T_Prob_Fair", "T_Prob_Book"]:
+            for ccol in ["T_wS","T_wC","T_wK","T_Prob_Fair","T_Prob_Book"]:
                 if ccol in tissue_out.columns:
                     tissue_out[ccol] = tissue_out[ccol].apply(lambda x: f"{float(x):.3f}" if pd.notna(x) else "")
-            for ccol in ["T_Odds_Fair", "T_Odds_Book", "MarketOdds"]:
+            for ccol in ["T_Odds_Fair","T_Odds_Book","MarketOdds"]:
                 if ccol in tissue_out.columns:
                     tissue_out[ccol] = tissue_out[ccol].apply(lambda x: f"{float(x):.2f}" if pd.notna(x) else "")
             if "Edge_Back" in tissue_out.columns:
-                tissue_out["Edge_Back"] = tissue_out["Edge_Back"].apply(lambda x: f"{float(x) * 100:.1f}%" if pd.notna(x) else "")
+                tissue_out["Edge_Back"] = tissue_out["Edge_Back"].apply(lambda x: f"{float(x)*100:.1f}%" if pd.notna(x) else "")
 
             st.dataframe(tissue_out, use_container_width=True)
 
@@ -1053,7 +1148,7 @@ with TAB_PACE:
                 gc = st.columns(6)
                 min_rank_for_consider = gc[0].number_input("Only consider top-N tissue ranks", min_value=1, max_value=20, value=3, step=1)
                 min_cond_wp = gc[1].slider("Min Conditions for Win–Place", 0.0, 10.0, 4.0, 0.5)
-                min_spc_wp = gc[2].slider("Min SpeedConsistency for Win–Place", 0.0, 10.0, 4.0, 0.5)
+                min_spc_wp  = gc[2].slider("Min SpeedConsistency for Win–Place", 0.0, 10.0, 4.0, 0.5)
                 min_edge_wp = gc[3].slider("Min value edge for Win–Place", 0.00, 0.50, 0.10, 0.01)
                 min_edge_win = gc[4].slider("Min value edge for Win Only", 0.00, 0.50, 0.08, 0.01)
                 show_table_all = gc[5].checkbox("Show guidance for entire field", value=True)
@@ -1110,10 +1205,8 @@ with TAB_PACE:
 
             guide["G_PaceExposed"] = [
                 _pace_exposed(sty, lcp)
-                for sty, lcp in zip(
-                    guide.get("Style", pd.Series([""] * len(guide))).tolist(),
-                    guide.get("LCP", pd.Series([""] * len(guide))).tolist()
-                )
+                for sty, lcp in zip(guide.get("Style", pd.Series([""]*len(guide))).tolist(),
+                                    guide.get("LCP", pd.Series([""]*len(guide))).tolist())
             ]
 
             guide["G_DiagOK_WP"] = (
@@ -1123,29 +1216,26 @@ with TAB_PACE:
 
             guide["G_ValueOK_WP"] = (pd.to_numeric(guide["Edge_Back"], errors="coerce") >= float(min_edge_wp))
             guide["G_ValueOK_WIN"] = (pd.to_numeric(guide["Edge_Back"], errors="coerce") >= float(min_edge_win))
+
             guide["G_TopN"] = (pd.to_numeric(guide.get("T_Rank", np.nan), errors="coerce") <= int(min_rank_for_consider))
 
-            # ✅ FIX 1: conditional guidance when market odds are missing
+            has_any_market = pd.to_numeric(guide.get("MarketOdds", np.nan), errors="coerce").notna().any()
+
             def _bet_guidance_row(r) -> str:
                 topn = bool(r.get("G_TopN", False))
                 if not topn:
                     return "🔴 No Bet"
 
+                edge_wp = bool(r.get("G_ValueOK_WP", False))
+                edge_win = bool(r.get("G_ValueOK_WIN", False))
                 diag_ok = bool(r.get("G_DiagOK_WP", False))
                 pace_ex = bool(r.get("G_PaceExposed", False))
 
-                edge_back_val = r.get("Edge_Back", np.nan)
-                has_market = pd.notna(edge_back_val)
-
-                # No market: give conditional guidance (don’t force "No Bet")
-                if not has_market:
+                # If we don't have market prices, provide conditional guidance
+                if not has_any_market:
                     if wp_allowed_by_pace and diag_ok and (not pace_ex):
                         return "🟢 Win–Place OK (IF value)"
                     return "🟡 Win Only (IF value)"
-
-                # With market: strict value-based calls
-                edge_wp = bool(r.get("G_ValueOK_WP", False))
-                edge_win = bool(r.get("G_ValueOK_WIN", False))
 
                 if wp_allowed_by_pace and diag_ok and (not pace_ex) and edge_wp:
                     return "🟢 Win–Place OK (20/80)"
@@ -1155,32 +1245,16 @@ with TAB_PACE:
 
             guide["Bet_Guidance"] = guide.apply(_bet_guidance_row, axis=1)
 
-            # ✅ FIX 2: improved headline when market odds/edge not provided
-                        # --- Race-level headline (FIXED & SAFE)
-            # Choose the best available action among top-N
+            # --- Race-level headline (FIXED & SAFE)
             topN_view = guide[guide["G_TopN"]].copy()
-
-            # Detect whether we actually have market odds / value info
-            has_any_market = (
-                "Edge_Back" in guide.columns
-                and pd.to_numeric(guide["Edge_Back"], errors="coerce").notna().any()
-            )
 
             if not topN_view.empty:
                 if (topN_view["Bet_Guidance"].astype(str).str.startswith("🟢")).any():
-                    if has_any_market:
-                        headline = "✅ Win–Place (20/80) is allowed on qualifying value selections."
-                    else:
-                        headline = "🟢 Win–Place structurally allowed (apply ONLY if market value exists)."
+                    headline = "✅ Win–Place (20/80) is allowed on qualifying value selections." if has_any_market else "🟢 Win–Place structurally allowed (apply ONLY if market value exists)."
                     level = "success"
-
                 elif (topN_view["Bet_Guidance"].astype(str).str.startswith("🟡")).any():
-                    if has_any_market:
-                        headline = "⚠️ Win–Place NOT advised. If betting, keep to WIN ONLY on value."
-                    else:
-                        headline = "🟡 Win Only structurally preferred (requires market value)."
+                    headline = "⚠️ Win–Place NOT advised. If betting, keep to WIN ONLY on value." if has_any_market else "🟡 Win Only structurally preferred (requires market value)."
                     level = "warning"
-
                 else:
                     headline = "⛔ No bet suggested (top-N lacks value/robustness)."
                     level = "info"
@@ -1195,31 +1269,23 @@ with TAB_PACE:
             else:
                 st.info(headline)
 
-
-            # --- Quick reasons (race context)
             reasons = []
             reasons.append(f"**Scenario:** {scenario_label}  |  **Band:** {band_label}  |  **Distance:** {distance_f}f")
             reasons.append(f"**Credible pace (High LCP):** Front {FH}, Prominent {PH}")
             reasons.append(f"**Hybrid active:** {is_hybrid}  |  **Tactical sensitivity:** {tactical_sensitive}")
             reasons.append(f"**Win–Place allowed by pace filter:** {wp_allowed_by_pace}")
-            if not has_any_market:
-                reasons.append("**Market odds provided:** False (guidance is conditional on value)")
-            else:
-                reasons.append("**Market odds provided:** True")
+            reasons.append(f"**Market odds provided:** {has_any_market}")
             st.markdown("- " + "\n- ".join(reasons))
 
-            # --- Show top-N guidance table
             show_cols = [
-                "T_Rank", "Horse", "Style", "LCP",
-                "Suitability", "Conditions_Score", "SpeedConsistency_Score",
-                "MarketOdds", "Edge_Back",
+                "T_Rank","Horse","Style","LCP",
+                "Suitability","Conditions_Score","SpeedConsistency_Score",
+                "MarketOdds","Edge_Back",
                 "Bet_Guidance"
             ]
             show_cols = [c for c in show_cols if c in guide.columns]
-
             guide_view = guide[show_cols].copy().sort_values("T_Rank")
 
-            # Format display (keep internal numeric in `guide`)
             if "Edge_Back" in guide_view.columns:
                 guide_view["Edge_Back"] = pd.to_numeric(guide_view["Edge_Back"], errors="coerce").apply(
                     lambda x: f"{x*100:.1f}%" if pd.notna(x) else ""
@@ -1237,14 +1303,6 @@ with TAB_PACE:
                 st.markdown("### Full field — bet type guidance")
                 st.dataframe(guide_view, use_container_width=True)
 
-            # (optional) download the guidance table too
-            st.download_button(
-                "💾 Download Bet Guidance CSV",
-                guide.to_csv(index=False),
-                "cleanpace_v3_bet_guidance.csv",
-                mime="text/csv"
-            )
-
             st.download_button(
                 "💾 Download Backbone + Diagnostics CSV",
                 df.to_csv(index=False),
@@ -1254,5 +1312,3 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
-
-
