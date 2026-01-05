@@ -1156,24 +1156,34 @@ with TAB_PACE:
             guide["Bet_Guidance"] = guide.apply(_bet_guidance_row, axis=1)
 
             # ✅ FIX 2: improved headline when market odds/edge not provided
+                        # --- Race-level headline (FIXED & SAFE)
+            # Choose the best available action among top-N
             topN_view = guide[guide["G_TopN"]].copy()
-            edge_series = pd.to_numeric(guide.get("Edge_Back", np.nan), errors="coerce")
-            has_any_market = bool(pd.notna(edge_series).any())
+
+            # Detect whether we actually have market odds / value info
+            has_any_market = (
+                "Edge_Back" in guide.columns
+                and pd.to_numeric(guide["Edge_Back"], errors="coerce").notna().any()
+            )
 
             if not topN_view.empty:
-                if not has_any_market:
-                    headline = "ℹ️ Market odds not provided — showing conditional bet guidance only (requires value)."
-                    level = "info"
-                else:
-                    if (topN_view["Bet_Guidance"].astype(str).str.startswith("🟢")).any():
+                if (topN_view["Bet_Guidance"].astype(str).str.startswith("🟢")).any():
+                    if has_any_market:
                         headline = "✅ Win–Place (20/80) is allowed on qualifying value selections."
-                        level = "success"
-                                        elif (topN_view["Bet_Guidance"].astype(str).str.startswith("🟡")).any():
-                        headline = "⚠️ Win–Place NOT advised. If betting, keep to WIN ONLY on value."
-                        level = "warning"
                     else:
-                        headline = "⛔ No bet suggested (top-N lacks value/robustness)."
-                        level = "info"
+                        headline = "🟢 Win–Place structurally allowed (apply ONLY if market value exists)."
+                    level = "success"
+
+                elif (topN_view["Bet_Guidance"].astype(str).str.startswith("🟡")).any():
+                    if has_any_market:
+                        headline = "⚠️ Win–Place NOT advised. If betting, keep to WIN ONLY on value."
+                    else:
+                        headline = "🟡 Win Only structurally preferred (requires market value)."
+                    level = "warning"
+
+                else:
+                    headline = "⛔ No bet suggested (top-N lacks value/robustness)."
+                    level = "info"
             else:
                 headline = "⛔ No bet suggested (no top-N candidates)."
                 level = "info"
@@ -1184,6 +1194,7 @@ with TAB_PACE:
                 st.warning(headline)
             else:
                 st.info(headline)
+
 
             # --- Quick reasons (race context)
             reasons = []
@@ -1243,4 +1254,5 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
+
 
