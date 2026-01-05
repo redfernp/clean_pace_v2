@@ -1110,44 +1110,60 @@ with TAB_PACE:
             guide["G_TopN"] = (pd.to_numeric(guide.get("T_Rank", np.nan), errors="coerce") <= int(min_rank_for_consider))
 
             # Final guidance
-            def _bet_guidance_row(r) -> str:
+           def _bet_guidance_row(r) -> str:
                 topn = bool(r.get("G_TopN", False))
                 if not topn:
                     return "🔴 No Bet"
 
-                # If no market odds, Edge_Back will be NaN: we then only provide structural guidance
-                edge_wp = r.get("G_ValueOK_WP", False)
-                edge_win = r.get("G_ValueOK_WIN", False)
-
                 diag_ok = bool(r.get("G_DiagOK_WP", False))
                 pace_ex = bool(r.get("G_PaceExposed", False))
 
-                # Race-level permission
+                # detect whether we actually have a usable market edge number
+                edge_back_val = r.get("Edge_Back", np.nan)
+                has_market = pd.notna(edge_back_val)
+
+                # If no market price, give conditional guidance (don’t force No Bet)
+                if not has_market:
+                    if wp_allowed_by_pace and diag_ok and (not pace_ex):
+                        return "🟢 Win–Place OK (IF value)"
+                    return "🟡 Win Only (IF value)"
+
+                # Otherwise use the real value rules
+                edge_wp = bool(r.get("G_ValueOK_WP", False))
+                edge_win = bool(r.get("G_ValueOK_WIN", False))
+
                 if wp_allowed_by_pace and diag_ok and (not pace_ex) and edge_wp:
                     return "🟢 Win–Place OK (20/80)"
-
-                # Otherwise: Win only if value exists and either pace is unstable or horse is pace-exposed
                 if edge_win:
                     return "🟡 Win Only"
-
                 return "🔴 No Bet"
 
             guide["Bet_Guidance"] = guide.apply(_bet_guidance_row, axis=1)
 
-            # --- Race-level headline
+                        # --- Race-level headline (improved for missing MarketOdds/Edge_Back) ---
             # Choose the best available action among top-N
             topN_view = guide[guide["G_TopN"]].copy()
+
+            # Do we actually have any usable market odds/edge values?
+            edge_series = pd.to_numeric(guide.get("Edge_Back", np.nan), errors="coerce")
+            has_any_market = bool(pd.notna(edge_series).any())
+
             if not topN_view.empty:
-                # Priority: green > yellow > red
-                if (topN_view["Bet_Guidance"].str.startswith("🟢")).any():
-                    headline = "✅ Win–Place (20/80) is allowed on qualifying value selections."
-                    level = "success"
-                elif (topN_view["Bet_Guidance"].str.startswith("🟡")).any():
-                    headline = "⚠️ Win–Place NOT advised. If betting, keep to WIN ONLY on value."
-                    level = "warning"
-                else:
-                    headline = "⛔ No bet suggested (top-N lacks value/robustness)."
+                if not has_any_market:
+                    # Market prices missing: show conditional guidance rather than "no bet"
+                    headline = "ℹ️ Market odds not provided — showing conditional bet guidance only (requires value)."
                     level = "info"
+                else:
+                    # Priority: green > yellow > red
+                    if (topN_view["Bet_Guidance"].astype(str).str.startswith("🟢")).any():
+                        headline = "✅ Win–Place (20/80) is allowed on qualifying value selections."
+                        level = "success"
+                    elif (topN_view["Bet_Guidance"].astype(str).str.startswith("🟡")).any():
+                        headline = "⚠️ Win–Place NOT advised. If betting, keep to WIN ONLY on value."
+                        level = "warning"
+                    else:
+                        headline = "⛔ No bet suggested (top-N lacks value/robustness)."
+                        level = "info"
             else:
                 headline = "⛔ No bet suggested (no top-N candidates)."
                 level = "info"
@@ -1158,6 +1174,7 @@ with TAB_PACE:
                 st.warning(headline)
             else:
                 st.info(headline)
+
 
             # --- Quick reasons (race context)
             reasons = []
@@ -1206,4 +1223,5 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
+
 
