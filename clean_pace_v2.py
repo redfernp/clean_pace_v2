@@ -1014,6 +1014,189 @@ with TAB_PACE:
 
             st.dataframe(tissue_out, use_container_width=True)
 
+                        # =========================
+            # NEW BOX: Bet Guidance (Execution Layer) — DOES NOT CHANGE ANY MODEL OUTPUTS
+            # =========================
+            st.markdown("## 🧭 Bet Guidance (20/80 Win–Place) — Execution Layer (No model changes)")
+
+            # --- Settings (light-touch, defaults aligned to our discussion)
+            with st.expander("Bet guidance settings (does not change backbone/tissue)", expanded=True):
+                gc = st.columns(6)
+                min_rank_for_consider = gc[0].number_input("Only consider top-N tissue ranks", min_value=1, max_value=20, value=3, step=1)
+                min_cond_wp = gc[1].slider("Min Conditions for Win–Place", 0.0, 10.0, 4.0, 0.5)
+                min_spc_wp  = gc[2].slider("Min SpeedConsistency for Win–Place", 0.0, 10.0, 4.0, 0.5)
+                min_edge_wp = gc[3].slider("Min value edge for Win–Place", 0.00, 0.50, 0.10, 0.01)
+                min_edge_win = gc[4].slider("Min value edge for Win Only", 0.00, 0.50, 0.08, 0.01)
+                show_table_all = gc[5].checkbox("Show guidance for entire field", value=True)
+
+                rc = st.columns(4)
+                block_wp_in_hybrid = rc[0].checkbox("Block Win–Place in Hybrid races", value=True)
+                block_wp_5f = rc[1].checkbox("Block Win–Place at 5f", value=True)
+                allow_wp_strong_route = rc[2].checkbox("Allow Win–Place in Strong (≥7f) for non-pace-exposed", value=True)
+                pace_exposed_front_blocks = rc[3].checkbox("Treat Front/leader-likely as pace-exposed", value=True)
+
+            # --- Race context (read-only from existing objects)
+            scenario_label = str(df["Scenario"].iloc[0]) if "Scenario" in df.columns else str(scenario)
+            band_label = str(band)
+            counts = debug.get("counts", {}) if isinstance(debug, dict) else {}
+            FH = int(counts.get("Front_High", 0))
+            PH = int(counts.get("Prominent_High", 0))
+
+            # --- Determine whether race is "stable enough" for Win–Place
+            is_hybrid = bool(use_hyb) or scenario_label.startswith("Hybrid")
+            is_5f = (band_label == "5f")
+            is_slow = scenario_label.startswith("Slow")
+            is_even = scenario_label.startswith("Even")
+            is_strong = scenario_label.startswith("Strong")  # includes "Strong" exact label
+
+            # "Tactical sensitivity" heuristic: multiple credible pace influences and not Slow
+            tactical_sensitive = (FH >= 2) or (FH >= 1 and PH >= 3) or (FH + PH >= 4)
+
+            # Baseline: Win–Place allowed mostly in Slow/Even; optionally in Strong at ≥7f if not pace-exposed.
+            wp_allowed_by_pace = False
+            if is_slow or is_even:
+                wp_allowed_by_pace = True
+            elif is_strong and allow_wp_strong_route and (float(distance_f) >= 7.0):
+                wp_allowed_by_pace = True
+            else:
+                wp_allowed_by_pace = False
+
+            if block_wp_in_hybrid and is_hybrid:
+                wp_allowed_by_pace = False
+            if block_wp_5f and is_5f:
+                wp_allowed_by_pace = False
+
+            # If tactically sensitive, discourage Win–Place even if labelled Even
+            # (this is the “race shape depends on jockey behaviour” guard)
+            if tactical_sensitive and not is_slow:
+                wp_allowed_by_pace = False
+
+            # --- Helper: classify pace exposure (leader-likely risk)
+            def _pace_exposed(style: str, lcp: str) -> bool:
+                if not pace_exposed_front_blocks:
+                    return False
+                style = str(style or "")
+                lcp = str(lcp or "")
+                # Front is always pace-exposed; Prominent with High LCP can be exposed in pressured races
+                if style == "Front":
+                    return True
+                if style == "Prominent" and lcp in ("High", "Questionable") and (FH + PH) >= 3:
+                    return True
+                return False
+
+            # --- Work off tissue dataframe we already built (sorted, ranked)
+            guide = tissue.copy()
+
+            # Ensure Edge_Back is numeric if it exists (it is numeric in `tissue`, formatted later in tissue_out)
+            if "Edge_Back" not in guide.columns:
+                guide["Edge_Back"] = np.nan
+
+            # Determine per-horse eligibility
+            guide["G_PaceExposed"] = [
+                _pace_exposed(sty, lcp)
+                for sty, lcp in zip(guide.get("Style", pd.Series([""]*len(guide))).tolist(),
+                                    guide.get("LCP", pd.Series([""]*len(guide))).tolist())
+            ]
+
+            guide["G_DiagOK_WP"] = (
+                (pd.to_numeric(guide.get("Conditions_Score", np.nan), errors="coerce") >= float(min_cond_wp))
+                & (pd.to_numeric(guide.get("SpeedConsistency_Score", np.nan), errors="coerce") >= float(min_spc_wp))
+            )
+
+            guide["G_ValueOK_WP"] = (pd.to_numeric(guide["Edge_Back"], errors="coerce") >= float(min_edge_wp))
+            guide["G_ValueOK_WIN"] = (pd.to_numeric(guide["Edge_Back"], errors="coerce") >= float(min_edge_win))
+
+            # Apply top-N focus
+            guide["G_TopN"] = (pd.to_numeric(guide.get("T_Rank", np.nan), errors="coerce") <= int(min_rank_for_consider))
+
+            # Final guidance
+            def _bet_guidance_row(r) -> str:
+                topn = bool(r.get("G_TopN", False))
+                if not topn:
+                    return "🔴 No Bet"
+
+                # If no market odds, Edge_Back will be NaN: we then only provide structural guidance
+                edge_wp = r.get("G_ValueOK_WP", False)
+                edge_win = r.get("G_ValueOK_WIN", False)
+
+                diag_ok = bool(r.get("G_DiagOK_WP", False))
+                pace_ex = bool(r.get("G_PaceExposed", False))
+
+                # Race-level permission
+                if wp_allowed_by_pace and diag_ok and (not pace_ex) and edge_wp:
+                    return "🟢 Win–Place OK (20/80)"
+
+                # Otherwise: Win only if value exists and either pace is unstable or horse is pace-exposed
+                if edge_win:
+                    return "🟡 Win Only"
+
+                return "🔴 No Bet"
+
+            guide["Bet_Guidance"] = guide.apply(_bet_guidance_row, axis=1)
+
+            # --- Race-level headline
+            # Choose the best available action among top-N
+            topN_view = guide[guide["G_TopN"]].copy()
+            if not topN_view.empty:
+                # Priority: green > yellow > red
+                if (topN_view["Bet_Guidance"].str.startswith("🟢")).any():
+                    headline = "✅ Win–Place (20/80) is allowed on qualifying value selections."
+                    level = "success"
+                elif (topN_view["Bet_Guidance"].str.startswith("🟡")).any():
+                    headline = "⚠️ Win–Place NOT advised. If betting, keep to WIN ONLY on value."
+                    level = "warning"
+                else:
+                    headline = "⛔ No bet suggested (top-N lacks value/robustness)."
+                    level = "info"
+            else:
+                headline = "⛔ No bet suggested (no top-N candidates)."
+                level = "info"
+
+            if level == "success":
+                st.success(headline)
+            elif level == "warning":
+                st.warning(headline)
+            else:
+                st.info(headline)
+
+            # --- Quick reasons (race context)
+            reasons = []
+            reasons.append(f"**Scenario:** {scenario_label}  |  **Band:** {band_label}  |  **Distance:** {distance_f}f")
+            reasons.append(f"**Credible pace (High LCP):** Front {FH}, Prominent {PH}")
+            reasons.append(f"**Hybrid active:** {is_hybrid}  |  **Tactical sensitivity:** {tactical_sensitive}")
+            reasons.append(f"**Win–Place allowed by pace filter:** {wp_allowed_by_pace}")
+            st.markdown("- " + "\n- ".join(reasons))
+
+            # --- Show top-N guidance table
+            show_cols = [
+                "T_Rank","Horse","Style","LCP",
+                "Suitability","Conditions_Score","SpeedConsistency_Score",
+                "MarketOdds","Edge_Back",
+                "Bet_Guidance"
+            ]
+            show_cols = [c for c in show_cols if c in guide.columns]
+
+            guide_view = guide[show_cols].copy().sort_values("T_Rank")
+
+            # Format display (keep internal numeric in `guide`)
+            if "Edge_Back" in guide_view.columns:
+                guide_view["Edge_Back"] = pd.to_numeric(guide_view["Edge_Back"], errors="coerce").apply(
+                    lambda x: f"{x*100:.1f}%" if pd.notna(x) else ""
+                )
+            if "MarketOdds" in guide_view.columns:
+                guide_view["MarketOdds"] = pd.to_numeric(guide_view["MarketOdds"], errors="coerce").apply(
+                    lambda x: f"{x:.2f}" if pd.notna(x) else ""
+                )
+
+            topN_only = guide_view[guide_view["T_Rank"] <= int(min_rank_for_consider)].copy()
+            st.markdown(f"### Top {int(min_rank_for_consider)} candidates — bet type guidance")
+            st.dataframe(topN_only, use_container_width=True)
+
+            if show_table_all:
+                st.markdown("### Full field — bet type guidance")
+                st.dataframe(guide_view, use_container_width=True)
+
+
             st.download_button(
                 "💾 Download Backbone + Diagnostics CSV",
                 df.to_csv(index=False),
@@ -1023,3 +1206,4 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
+
