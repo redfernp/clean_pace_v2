@@ -400,135 +400,323 @@ def late_strong_warn_hybrid_only_6f(distance_f: float,
         return True
     return False
 
+# ==========================================================
+# NEW: Pace Trigger Matrix helpers (logic-only, no UI change)
+# ==========================================================
+def _route_subband(distance_f: float) -> str:
+    """
+    Internal segmentation for route races.
+    UI band stays 'route' (no UI changes).
+    """
+    d = float(distance_f)
+    if d <= 7.5:
+        return "7f"
+    if d <= 9.5:
+        return "R8-9"     # ~1m to 1m2
+    if d <= 12.5:
+        return "R10-12"   # ~1m2 to 1m4½
+    return "R13+"         # ~1m5+
+
+def _scenario_step_down(scn: str) -> str:
+    """Downgrade one level: Very Strong -> Strong -> Even -> Slow (Even tags count as Even)."""
+    if scn == "Very Strong":
+        return "Strong"
+    if scn == "Strong":
+        return "Even"
+    if str(scn).startswith("Even"):
+        return "Slow"
+    return scn
+
+# ==========================================================
+# NEW: Pace Trigger Matrix (distance-segmented)
+# Returns scenario, confidence, debug rules (same interface)
+# ==========================================================
 def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float,Dict[str,str],Dict[str,object]]:
-    debug = {"rules_applied": []}
+    debug: Dict[str, object] = {"rules_applied": []}
     if not rows:
-        return "N/A", 0.0, {}, {"error": "no rows"}
+        return "N/A", 0.0, {}, {"error": "no rows", "rules_applied": []}
 
-    d = pd.DataFrame([{"horse":r.horse, "style":r.style_cat, "dvp":r.dvp, "lcp":r.lcp} for r in rows])
+    d = pd.DataFrame([{"horse": r.horse, "style": r.style_cat, "dvp": r.dvp, "lcp": r.lcp} for r in rows])
 
-    front_all = d[d["style"]=="Front"]
-    prom_all  = d[d["style"]=="Prominent"]
-    front_high = d[(d["style"]=="Front") & (d["lcp"]=="High")]
-    prom_high  = d[(d["style"]=="Prominent") & (d["lcp"]=="High")]
-    front_q    = d[(d["style"]=="Front") & (d["lcp"]=="Questionable")]
-    prom_q     = d[(d["style"]=="Prominent") & (d["lcp"]=="Questionable")]
+    front_all = d[d["style"] == "Front"]
+    prom_all  = d[d["style"] == "Prominent"]
 
-    n_front = len(front_all)
-    n_fh = len(front_high)
-    n_ph = len(prom_high)
-    n_fq = len(front_q)
-    n_pq = len(prom_q)
+    front_high = d[(d["style"] == "Front") & (d["lcp"] == "High")]
+    prom_high  = d[(d["style"] == "Prominent") & (d["lcp"] == "High")]
 
+    front_q = d[(d["style"] == "Front") & (d["lcp"] == "Questionable")]
+    prom_q  = d[(d["style"] == "Prominent") & (d["lcp"] == "Questionable")]
+
+    n_front = int(len(front_all))
+    n_fh = int(len(front_high))
+    n_ph = int(len(prom_high))
+    n_fq = int(len(front_q))
+    n_pq = int(len(prom_q))
+
+    high_early = n_fh + n_ph
+    q_early = n_fq + n_pq
+
+    # Energy weights (kept consistent with your engine style)
     W_FH, W_PH, W_FQ, W_PQ = 2.0, 0.8, 0.5, 0.2
-    energy = (W_FH*n_fh) + (W_PH*n_ph) + (W_FQ*n_fq) + (W_PQ*n_pq)
+    energy = (W_FH * n_fh) + (W_PH * n_ph) + (W_FQ * n_fq) + (W_PQ * n_pq)
 
     band = _dist_band(s.distance_f)
+    route_sb = _route_subband(s.distance_f) if band == "route" else None
 
-    if n_fh >= 3:
-        scenario, conf = "Strong", 0.80
-        debug["rules_applied"].append("≥3 High-LCP Fronts → Strong (locked)")
-    else:
-        if n_fh >= 2:
+    dvp_front_high: Optional[float] = None
+    if n_fh == 1:
+        try:
+            dvp_front_high = float(front_high["dvp"].iloc[0])
+        except Exception:
+            dvp_front_high = None
+
+    allow_strong_no_front = False
+    if n_front == 0 and n_ph >= 4:
+        try:
+            allow_strong_no_front = float(prom_high["dvp"].mean()) >= -1.0
+        except Exception:
+            allow_strong_no_front = False
+
+    scenario: str = "Slow"
+    conf: float = 0.70
+
+    # -------------------------
+    # 5f
+    # -------------------------
+    if band == "5f":
+        if n_fh >= 3:
+            scenario, conf = "Very Strong", 0.80
+            debug["rules_applied"].append("5f: ≥3 High-LCP Fronts → Very Strong (locked)")
+        elif (n_fh >= 2 and high_early >= 4):
+            scenario, conf = "Very Strong", 0.75
+            debug["rules_applied"].append("5f: ≥2 High Front + HighEarly≥4 → Very Strong")
+        elif n_fh == 2:
             scenario, conf = "Strong", 0.65
-            debug["rules_applied"].append("≥2 High Front → Strong")
-        elif (n_fh+n_ph)>=3 and energy>=3.2:
+            debug["rules_applied"].append("5f: 2 High Front → Strong")
+        elif (high_early >= 3 and energy >= 3.2):
             scenario, conf = "Strong", 0.65
-            debug["rules_applied"].append("≥3 High early & energy≥3.2 → Strong")
-        elif energy >= 3.2:
-            scenario, conf = "Strong", 0.60
-            debug["rules_applied"].append("energy≥3.2 → Strong")
-        elif (n_fh+n_ph) >= 2:
+            debug["rules_applied"].append("5f: HighEarly≥3 & energy≥3.2 → Strong")
+        elif high_early == 2:
             scenario, conf = "Even", 0.60
-            debug["rules_applied"].append("≥2 High early → Even")
-        elif (n_fh+n_ph) == 1 and (n_fq+n_pq) >= 1:
+            debug["rules_applied"].append("5f: HighEarly==2 → Even")
+        elif (high_early == 1 and q_early >= 1):
             scenario, conf = "Even", 0.55
-            debug["rules_applied"].append("1 High + Questionables → Even")
-        elif (n_fh+n_ph) == 1:
-            scenario, conf = "Even", 0.60
-            debug["rules_applied"].append("1 High → Even")
-        elif (n_fq+n_pq) >= 1:
-            scenario, conf = "Slow", 0.60
-            debug["rules_applied"].append("Only Questionables → Slow")
+            debug["rules_applied"].append("5f: 1 High + Questionables → Even")
+        elif (high_early == 1 and q_early == 0):
+            scenario, conf = "Slow", 0.65
+            debug["rules_applied"].append("5f: Single early only → Slow")
         else:
             scenario, conf = "Slow", 0.70
-            debug["rules_applied"].append("No credible early → Slow")
+            debug["rules_applied"].append("5f: No credible early → Slow")
 
-        if n_front == 0 or n_fh == 0:
-            allow_strong = False
-            if n_ph >= 3:
-                try:
-                    allow_strong = float(prom_high["dvp"].mean()) >= -1.0
-                except Exception:
-                    allow_strong = False
-            if not allow_strong and scenario in ("Strong","Very Strong"):
-                scenario, conf = "Even", min(conf,0.60)
-                debug["rules_applied"].append("No-front cap → Even")
+        # sprint cap: don't call it Slow if there are ≥2 credible pace angles
+        if scenario == "Slow" and high_early >= 2:
+            scenario, conf = "Even", max(conf, 0.60)
+            debug["rules_applied"].append("5f cap: HighEarly≥2 → not Slow")
 
-        if n_fh == 1 and n_ph <= 1:
-            try:
-                lf = float(front_high["dvp"].iloc[0])
-            except Exception:
-                lf = None
-            if (lf is not None) and (lf >= 2.0) and scenario in ("Strong","Very Strong"):
-                scenario, conf = "Even", max(conf,0.65)
-                debug["rules_applied"].append("Dominant-front cap → Even")
-
-        if n_fh == 1:
-            try:
-                lf2 = float(front_high["dvp"].iloc[0])
-            except Exception:
-                lf2 = None
-            if (lf2 is None) or (lf2 <= 1.0):
-                if scenario in ("Strong","Very Strong"):
-                    scenario, conf = "Even", max(conf,0.60)
-                    debug["rules_applied"].append("Single-front cap (≤+1) → Even")
-            if (lf2 is not None) and (lf2 <= -2.0) and (n_ph <= 1) and scenario == "Even":
-                scenario, conf = "Slow", max(conf,0.65)
-                debug["rules_applied"].append("Single-front below par → Slow")
-
-        if n_front == 1:
-            try:
-                anyf = float(front_all["dvp"].iloc[0])
-            except Exception:
-                anyf = None
-            if (anyf is not None) and (anyf <= -8.0):
-                idx = max(0, ["Slow","Even","Strong","Very Strong"].index(scenario)-1)
-                scenario = ["Slow","Even","Strong","Very Strong"][idx]
-                conf = max(conf,0.65)
-                debug["rules_applied"].append("Weak solo leader → downgrade")
-
-        if band in ("5f","6f") and n_fh == 1 and n_ph <= 2:
-            try:
-                lf = float(front_high["dvp"].iloc[0])
-            except Exception:
-                lf = None
-            dvp_ok = -0.5 if band=="5f" else -1.0
-            energy_cap = 4.0 if band=="5f" else 3.6
-            if (lf is not None) and (lf >= dvp_ok) and (energy < energy_cap) and scenario in ("Strong","Very Strong"):
-                scenario, conf = "Even", max(conf,0.65)
-                debug["rules_applied"].append("Sprint cap: Strong→Even")
-
-        if band == "route" and scenario == "Even" and n_fh == 1 and n_ph <= 1:
-            try:
-                lf = float(front_high["dvp"].iloc[0])
-            except Exception:
-                lf = None
-            if (lf is not None) and (lf >= -1.0):
+        # tag front-controlled for "single solid leader" structures
+        if scenario in ("Even", "Slow"):
+            if (n_fh == 1 and n_ph <= 1 and dvp_front_high is not None and dvp_front_high >= -1.0):
                 scenario = "Even (Front-Controlled)"
                 debug["rules_applied"].append("Front-controlled tag")
 
+    # -------------------------
+    # 6f
+    # -------------------------
+    elif band == "6f":
+        if n_fh >= 3:
+            scenario, conf = "Very Strong", 0.80
+            debug["rules_applied"].append("6f: ≥3 High-LCP Fronts → Very Strong (locked)")
+        elif n_fh >= 2:
+            scenario, conf = "Strong", 0.65
+            debug["rules_applied"].append("6f: ≥2 High Front → Strong")
+        elif (high_early >= 3 and energy >= 3.2):
+            scenario, conf = "Strong", 0.65
+            debug["rules_applied"].append("6f: HighEarly≥3 & energy≥3.2 → Strong")
+        elif energy >= 3.6:
+            scenario, conf = "Strong", 0.60
+            debug["rules_applied"].append("6f: energy≥3.6 → Strong")
+        elif high_early == 2:
+            scenario, conf = "Even", 0.60
+            debug["rules_applied"].append("6f: HighEarly==2 → Even")
+        elif (high_early == 1 and q_early >= 1):
+            scenario, conf = "Even", 0.55
+            debug["rules_applied"].append("6f: 1 High + Questionables → Even")
+        elif (high_early == 1 and q_early == 0):
+            scenario, conf = "Slow", 0.65
+            debug["rules_applied"].append("6f: Single early only → Slow")
+        else:
+            scenario, conf = "Slow", 0.70
+            debug["rules_applied"].append("6f: No credible early → Slow")
+
+        if scenario == "Slow" and high_early >= 2:
+            scenario, conf = "Even", max(conf, 0.60)
+            debug["rules_applied"].append("6f cap: HighEarly≥2 → not Slow")
+
+        if scenario in ("Even", "Slow"):
+            if (n_fh == 1 and n_ph <= 1 and dvp_front_high is not None and dvp_front_high >= -1.0):
+                scenario = "Even (Front-Controlled)"
+                debug["rules_applied"].append("Front-controlled tag")
+
+        debug["late_strong_risk"] = bool(high_early >= 3 and n_fh in (1, 2) and energy >= 3.2)
+        if debug["late_strong_risk"]:
+            debug["rules_applied"].append("6f: Late-Strong risk flag (HighEarly≥3 & FH∈{1,2} & energy≥3.2)")
+
+    # -------------------------
+    # Route (internally segmented)
+    # -------------------------
+    else:
+        assert route_sb is not None
+
+        if route_sb == "7f":
+            if n_fh >= 3:
+                scenario, conf = "Very Strong", 0.80
+                debug["rules_applied"].append("7f: ≥3 High-LCP Fronts → Very Strong (locked)")
+            elif n_fh >= 2:
+                scenario, conf = "Strong", 0.65
+                debug["rules_applied"].append("7f: ≥2 High Front → Strong")
+            elif (high_early >= 3 and energy >= 3.2):
+                scenario, conf = "Strong", 0.65
+                debug["rules_applied"].append("7f: HighEarly≥3 & energy≥3.2 → Strong")
+            elif (energy >= 3.2 and high_early >= 2):
+                scenario, conf = "Strong", 0.60
+                debug["rules_applied"].append("7f: energy≥3.2 & HighEarly≥2 → Strong")
+            elif high_early == 2:
+                scenario, conf = "Even", 0.60
+                debug["rules_applied"].append("7f: HighEarly==2 → Even")
+            elif (high_early == 1 and q_early >= 1):
+                scenario, conf = "Even", 0.55
+                debug["rules_applied"].append("7f: 1 High + Questionables → Even")
+            elif (high_early == 1 and q_early == 0):
+                if (dvp_front_high is not None) and (dvp_front_high >= -1.0):
+                    scenario, conf = "Even (Front-Controlled)", 0.60
+                    debug["rules_applied"].append("7f: Single solid leader → Even (Front-Controlled)")
+                else:
+                    scenario, conf = "Slow", 0.65
+                    debug["rules_applied"].append("7f: Single leader not solid → Slow")
+            else:
+                scenario, conf = "Slow", 0.70
+                debug["rules_applied"].append("7f: No credible early → Slow")
+
+        elif route_sb == "R8-9":
+            if n_fh >= 3:
+                scenario, conf = "Very Strong", 0.80
+                debug["rules_applied"].append("R8-9: ≥3 High-LCP Fronts → Very Strong (locked)")
+            elif n_fh >= 2:
+                scenario, conf = "Strong", 0.65
+                debug["rules_applied"].append("R8-9: ≥2 High Front → Strong")
+            elif (high_early >= 3 and energy >= 3.2):
+                scenario, conf = "Strong", 0.65
+                debug["rules_applied"].append("R8-9: HighEarly≥3 & energy≥3.2 → Strong")
+            elif (energy >= 3.6 and high_early >= 3):
+                scenario, conf = "Strong", 0.60
+                debug["rules_applied"].append("R8-9: energy≥3.6 & HighEarly≥3 → Strong")
+            elif high_early == 2:
+                scenario, conf = "Even", 0.60
+                debug["rules_applied"].append("R8-9: HighEarly==2 → Even")
+            elif (high_early == 1 and q_early >= 1):
+                scenario, conf = "Even", 0.55
+                debug["rules_applied"].append("R8-9: 1 High + Questionables → Even")
+            elif (high_early == 1 and q_early == 0):
+                if (dvp_front_high is not None) and (dvp_front_high >= -1.0):
+                    scenario, conf = "Even (Front-Controlled)", 0.60
+                    debug["rules_applied"].append("R8-9: Single solid leader → Even (Front-Controlled)")
+                else:
+                    scenario, conf = "Slow", 0.65
+                    debug["rules_applied"].append("R8-9: Single leader not solid → Slow")
+            else:
+                scenario, conf = "Slow", 0.70
+                debug["rules_applied"].append("R8-9: No credible early → Slow")
+
+        elif route_sb == "R10-12":
+            if (n_fh >= 3 and high_early >= 4):
+                scenario, conf = "Very Strong", 0.75
+                debug["rules_applied"].append("R10-12: FH≥3 & HighEarly≥4 → Very Strong")
+            elif n_fh >= 3:
+                scenario, conf = "Strong", 0.65
+                debug["rules_applied"].append("R10-12: FH≥3 → Strong")
+            elif (n_fh >= 2 and high_early >= 3):
+                scenario, conf = "Strong", 0.60
+                debug["rules_applied"].append("R10-12: FH≥2 & HighEarly≥3 → Strong")
+            elif (high_early >= 4 and energy >= 3.2):
+                scenario, conf = "Strong", 0.60
+                debug["rules_applied"].append("R10-12: HighEarly≥4 & energy≥3.2 → Strong")
+            elif high_early in (2, 3):
+                scenario, conf = "Even", 0.60
+                debug["rules_applied"].append("R10-12: HighEarly in {2,3} → Even")
+            elif (high_early == 1 and q_early >= 1):
+                scenario, conf = "Even", 0.55
+                debug["rules_applied"].append("R10-12: 1 High + Questionables → Even")
+            elif (high_early == 1 and q_early == 0):
+                if (dvp_front_high is not None) and (dvp_front_high >= -1.5):
+                    scenario, conf = "Even (Front-Controlled)", 0.60
+                    debug["rules_applied"].append("R10-12: Single solid-ish leader → Even (Front-Controlled)")
+                else:
+                    scenario, conf = "Slow", 0.65
+                    debug["rules_applied"].append("R10-12: Single leader not solid → Slow")
+            else:
+                scenario, conf = "Slow", 0.70
+                debug["rules_applied"].append("R10-12: No credible early → Slow")
+
+        else:  # R13+
+            if (n_fh >= 3 and high_early >= 4):
+                scenario, conf = "Strong", 0.60
+                debug["rules_applied"].append("R13+: FH≥3 & HighEarly≥4 → Strong")
+            elif (high_early >= 5 and energy >= 3.2):
+                scenario, conf = "Strong", 0.60
+                debug["rules_applied"].append("R13+: HighEarly≥5 & energy≥3.2 → Strong")
+            elif high_early in (2, 3, 4):
+                scenario, conf = "Even", 0.60
+                debug["rules_applied"].append("R13+: HighEarly in {2,3,4} → Even")
+            else:
+                scenario, conf = "Slow", 0.70
+                debug["rules_applied"].append("R13+: HighEarly in {0,1} → Slow")
+
+            if scenario in ("Even", "Slow"):
+                if (n_fh == 1 and n_ph == 0 and dvp_front_high is not None and dvp_front_high >= -1.0):
+                    scenario = "Even (Front-Controlled)"
+                    debug["rules_applied"].append("R13+: optional Front-controlled tag")
+
+        # Route-global caps/corrections
+        if n_front == 0 and scenario in ("Strong", "Very Strong") and not allow_strong_no_front:
+            scenario, conf = "Even", min(conf, 0.60)
+            debug["rules_applied"].append("No-front cap → Even")
+
+        if n_front == 1:
+            try:
+                any_front_dvp = float(front_all["dvp"].iloc[0])
+            except Exception:
+                any_front_dvp = None
+            if (any_front_dvp is not None) and (any_front_dvp <= -8.0):
+                prev = scenario
+                scenario = _scenario_step_down(scenario)
+                conf = max(conf, 0.65)
+                debug["rules_applied"].append(f"Weak solo leader → downgrade ({prev}→{scenario})")
+
+        if scenario in ("Strong", "Very Strong") and n_fh == 1:
+            if not (n_fh >= 2 or high_early >= 3):
+                prev = scenario
+                scenario, conf = "Even", max(conf, 0.60)
+                debug["rules_applied"].append(f"Route single-front cap → Even ({prev}→Even)")
+
     debug.update({
-        "counts":{
-            "Front_all":int(n_front),
-            "Front_High":int(n_fh),
-            "Prominent_High":int(n_ph)
+        "counts": {
+            "Front_all": int(n_front),
+            "Front_High": int(n_fh),
+            "Prominent_High": int(n_ph),
+            "Front_Questionable": int(n_fq),
+            "Prominent_Questionable": int(n_pq),
+            "HighEarly": int(high_early),
+            "QEarly": int(q_early),
         },
         "early_energy": float(energy),
-        "distance_band": band
+        "distance_band": band,
+        "route_subband": route_sb,
+        "dvp_front_high": dvp_front_high,
+        "allow_strong_no_front": bool(allow_strong_no_front),
     })
     lcp_map = dict(zip(d["horse"], d["lcp"]))
-    return scenario, conf, lcp_map, debug
+    return scenario, float(conf), lcp_map, debug
 
 # =========================
 # Diagnostics (separate; no effect on Suitability)
@@ -607,9 +795,9 @@ with TAB_MAIN:
 
             bf_df = parse_betfair_backall(boxC) if boxC.strip() else pd.DataFrame(columns=["Horse","MarketOdds"])
 
-            for d in (rs_df, b_df, bf_df):
-                if "Horse" in d.columns:
-                    d["Horse"] = d["Horse"].astype(str).str.strip()
+            for ddf in (rs_df, b_df, bf_df):
+                if "Horse" in ddf.columns:
+                    ddf["Horse"] = ddf["Horse"].astype(str).str.strip()
 
             merged = rs_df.merge(b_df, on="Horse", how="outer")
             if not bf_df.empty:
@@ -650,10 +838,12 @@ with TAB_PACE:
     wp_conf    = c[3].slider("wp (Predictable Slow/Very Strong)", 0.3, 0.8, 0.65, 0.05)
     clip5      = c[4].checkbox("Clip Suitability to 1–5", value=True)
 
+    # (Optional) key improves persistence across reruns; no UI change in appearance
     pace_override = st.selectbox(
         "Pace override (optional)",
         options=["Auto", "Slow", "Even", "Strong", "Very Strong"],
         index=0,
+        key="pace_override",
         help="Leave as 'Auto' to use the modelled pace, or select a scenario to override it."
     )
 
@@ -711,13 +901,19 @@ with TAB_PACE:
             ) for _, r in df.iterrows()]
             scenario, conf_numeric, lcp_map, debug = project_pace_from_rows(rows, s)
 
-            if pace_override != "Auto":
+            # =========================
+            # FIX: Manual override behaves like "truth"
+            # =========================
+            manual_override = (pace_override != "Auto")
+            if manual_override:
                 debug["rules_applied"].append(f"Manual override applied: {pace_override}")
                 debug["manual_override"] = pace_override
                 scenario = pace_override
                 conf_display = "Manual"
+                conf_effective = 0.80  # numeric for any gates
             else:
                 conf_display = f"{conf_numeric:.2f}"
+                conf_effective = float(conf_numeric)
 
             band = "5f" if distance_f <= 5.5 else ("6f" if distance_f <= 6.5 else "route")
 
@@ -734,17 +930,36 @@ with TAB_PACE:
                 strong_map = PACEFIT["Strong"]
                 slow_map = PACEFIT["Slow"]
 
+            # =========================
+            # FIX: Very Strong works at 5f/6f (sprint maps lack key)
+            # =========================
             if scenario.startswith("Even (Front-Controlled)") and band == "route":
                 pacefit_map = PACEFIT_EVEN_FC
+
             elif band == "5f":
-                pacefit_map = PACEFIT_5F["Even"] if scenario.startswith("Even") else PACEFIT_5F.get(scenario, PACEFIT_5F["Even"])
+                if scenario == "Very Strong":
+                    pacefit_map = PACEFIT["Very Strong"]
+                else:
+                    pacefit_map = PACEFIT_5F["Even"] if scenario.startswith("Even") else PACEFIT_5F.get(scenario, PACEFIT_5F["Even"])
+
             elif band == "6f":
-                pacefit_map = PACEFIT_6F["Even"] if scenario.startswith("Even") else PACEFIT_6F.get(scenario, PACEFIT_6F["Even"])
+                if scenario == "Very Strong":
+                    pacefit_map = PACEFIT["Very Strong"]
+                else:
+                    pacefit_map = PACEFIT_6F["Even"] if scenario.startswith("Even") else PACEFIT_6F.get(scenario, PACEFIT_6F["Even"])
+
             else:
                 key = "Even" if scenario.startswith("Even") else scenario
                 pacefit_map = PACEFIT.get(key, PACEFIT["Even"])
 
-            wp = s.wp_confident if (scenario in ("Slow","Very Strong") and conf_numeric >= 0.65) else s.wp_even
+            # =========================
+            # FIX: wp decided correctly under manual override
+            # =========================
+            if manual_override:
+                wp = s.wp_confident if scenario in ("Slow", "Very Strong") else s.wp_even
+            else:
+                wp = s.wp_confident if (scenario in ("Slow","Very Strong") and conf_effective >= 0.65) else s.wp_even
+
             if band == "5f": wp = max(wp, 0.60)
             elif band == "6f": wp = max(wp, 0.55)
             ws = 1 - wp
@@ -759,7 +974,6 @@ with TAB_PACE:
                 return 1.0
 
             df["SpeedFit"] = df["ΔvsPar"].apply(_speedfit)
-
             df["PaceFit"] = df["Style"].map(pacefit_map).fillna(3.0)
 
             df["PaceFit_Slow"]   = df["Style"].map(slow_map).fillna(3.0)
@@ -781,7 +995,7 @@ with TAB_PACE:
                 use_hyb = should_use_hybrid(
                     distance_f=distance_f,
                     scenario=scenario,
-                    confidence=conf_numeric,
+                    confidence=conf_effective,   # (safe; same as conf_numeric in Auto)
                     counts=debug.get("counts", {})
                 )
 
@@ -803,7 +1017,7 @@ with TAB_PACE:
             late_strong_warn = late_strong_warn_hybrid_only_6f(
                 distance_f=distance_f,
                 use_hybrid=use_hyb,
-                confidence=conf_numeric,
+                confidence=conf_effective,
                 counts=debug.get("counts", {}),
                 energy=debug.get("early_energy", 0.0),
             )
@@ -974,7 +1188,7 @@ with TAB_PACE:
             st.dataframe(df[overlay_cols].sort_values(["Suitability"], ascending=False), use_container_width=True)
 
             # =========================
-            # NEW BOX: Tissue v2 (pricing layer only; does not affect backbone/diagnostics)
+            # Tissue v2 (pricing layer only; does not affect backbone/diagnostics)
             # =========================
             st.markdown("## 💷 Tissue Prices v2 (Softmax + Evidence Control)")
 
@@ -1140,7 +1354,7 @@ with TAB_PACE:
             st.dataframe(tissue_out, use_container_width=True)
 
             # =========================
-            # NEW BOX: Bet Guidance (Execution Layer) — DOES NOT CHANGE ANY MODEL OUTPUTS
+            # Bet Guidance (Execution Layer) — DOES NOT CHANGE ANY MODEL OUTPUTS
             # =========================
             st.markdown("## 🧭 Bet Guidance (20/80 Win–Place) — Execution Layer (No model changes)")
 
