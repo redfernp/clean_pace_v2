@@ -486,22 +486,22 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
     # 5f
     # -------------------------
     if band == "5f":
-    if n_fh >= 3:
+        if n_fh >= 3:
         scenario, conf = "Very Strong", 0.80
         debug["rules_applied"].append("5f: ≥3 High-LCP Fronts → Very Strong (locked)")
-    elif (n_fh >= 2 and high_early >= 4):
+        elif (n_fh >= 2 and high_early >= 4):
         scenario, conf = "Very Strong", 0.75
         debug["rules_applied"].append("5f: ≥2 High Front + HighEarly≥4 → Very Strong")
-    elif n_fh == 2:
+        elif n_fh == 2:
         scenario, conf = "Strong", 0.65
         debug["rules_applied"].append("5f: 2 High Front → Strong")
 
     # ✅ REPLACEMENT STARTS HERE
-    elif (n_fh >= 2) or (n_fh == 1 and n_ph >= 3):
+        elif (n_fh >= 2) or (n_fh == 1 and n_ph >= 3):
         scenario, conf = "Strong", 0.65
         debug["rules_applied"].append("5f: FH≥2 OR (FH==1 & PH≥3) → Strong")
 
-    elif (high_early >= 3 and energy >= 3.2):
+        elif (high_early >= 3 and energy >= 3.2):
         if n_runners >= 9:
             scenario, conf = "Strong", 0.60
             debug["rules_applied"].append("5f: HighEarly≥3 & energy≥3.2 & runners≥9 → Strong")
@@ -510,16 +510,16 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
             debug["rules_applied"].append("5f: HighEarly≥3 in small field → cap to Even")
     # ✅ REPLACEMENT ENDS HERE
 
-    elif high_early == 2:
+        elif high_early == 2:
         scenario, conf = "Even", 0.60
         debug["rules_applied"].append("5f: HighEarly==2 → Even")
-    elif (high_early == 1 and q_early >= 1):
+        elif (high_early == 1 and q_early >= 1):
         scenario, conf = "Even", 0.55
         debug["rules_applied"].append("5f: 1 High + Questionables → Even")
-    elif (high_early == 1 and q_early == 0):
+        elif (high_early == 1 and q_early == 0):
         scenario, conf = "Slow", 0.65
         debug["rules_applied"].append("5f: Single early only → Slow")
-    else:
+        else:
         scenario, conf = "Slow", 0.70
         debug["rules_applied"].append("5f: No credible early → Slow")
 
@@ -1540,4 +1540,5 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
+
 
