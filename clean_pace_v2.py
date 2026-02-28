@@ -356,11 +356,16 @@ def should_use_hybrid(distance_f: float,
                       scenario: str,
                       confidence: float,
                       counts: dict) -> bool:
-    FH = counts.get("Front_High", 0)
-    PH = counts.get("Prominent_High", 0)
+    FH = int(counts.get("Front_High", 0))
+    PH = int(counts.get("Prominent_High", 0))
     total_high = FH + PH
 
-    if distance_f > 8.0:
+    # ✅ 5f rule: only allow Hybrid if there are 2+ High Fronts
+    if float(distance_f) <= 5.5:
+        if FH < 2:
+            return False
+
+    if float(distance_f) > 8.0:
         return False
     if scenario.startswith("Slow") or scenario.startswith("Very Strong"):
         return False
@@ -372,6 +377,7 @@ def should_use_hybrid(distance_f: float,
         return False
     if FH >= 3:
         return False
+
     if FH in (1, 2) and total_high >= 2:
         return True
     return False
@@ -1546,6 +1552,7 @@ with TAB_PACE:
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
+
 
 
 
