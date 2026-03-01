@@ -661,7 +661,7 @@ def project_pace_from_rows(rows: List[HorseRow], s: Settings) -> Tuple[str,float
             elif n_fh >= 3:
                 scenario, conf = "Strong", 0.65
                 debug["rules_applied"].append("R10-12: FH≥3 → Strong")
-            elif (n_fh >= 2 and high_early >= 3):
+            elif (n_fh >= 2 and high_early >= 4):
                 scenario, conf = "Strong", 0.60
                 debug["rules_applied"].append("R10-12: FH≥2 & HighEarly≥3 → Strong")
             elif (high_early >= 4 and energy >= 3.2):
